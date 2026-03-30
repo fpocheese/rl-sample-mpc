@@ -62,15 +62,11 @@ class FollowModule:
             elif ds < -self.track_length / 2:
                 ds += self.track_length
 
-            # Prefer opponents ahead (ds > 0)
-            abs_ds = abs(ds)
-            # Bonus for ahead: treat as closer
-            effective_ds = abs_ds if ds > 0 else abs_ds * 1.5
-
-            if effective_ds < best_abs_ds:
-                best_abs_ds = effective_ds
-                best = opp
-                best['_delta_s'] = ds  # positive = ahead
+            if ds > 0 and ds < 100.0:  # strictly ahead and within 100m
+                if ds < best_abs_ds:
+                    best_abs_ds = ds
+                    best = opp
+                    best['_delta_s'] = ds
 
         return best
 
