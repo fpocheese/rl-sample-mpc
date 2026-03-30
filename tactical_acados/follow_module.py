@@ -215,8 +215,8 @@ class FollowModule:
 
         for i in range(N):
             if gap_profile[i] < gap_min:
-                # Emergency: hard speed cap at leader speed * 0.8
-                V_adjusted[i] = min(V_adjusted[i], leader_V * 0.8)
+                # Emergency: hard speed cap at leader speed * 0.95
+                V_adjusted[i] = min(V_adjusted[i], leader_V * 0.95)
             elif gap_profile[i] < gap_desired:
                 # Proportional: blend between current and leader speed
                 ratio = (gap_profile[i] - gap_min) / max(gap_desired - gap_min, 0.1)
@@ -310,11 +310,11 @@ class FollowModule:
         # Speed scale: match leader, reduce if gap small
         gap_abs = abs(gap)
         if gap_abs < self.cfg.follow_gap_min:
-            speed_scale = 0.7
+            speed_scale = 0.85
         elif gap_abs < self.cfg.follow_gap_default:
             ratio = (gap_abs - self.cfg.follow_gap_min) / \
                     max(self.cfg.follow_gap_default - self.cfg.follow_gap_min, 0.1)
-            speed_scale = 0.7 + 0.2 * ratio
+            speed_scale = 0.85 + 0.15 * ratio
         else:
             speed_scale = 1.0
 

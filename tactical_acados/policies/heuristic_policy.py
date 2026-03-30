@@ -92,11 +92,11 @@ class HeuristicTacticalPolicy:
         """Decide how to overtake opponent ahead."""
         gap = abs(target.delta_s)
 
-        # If too far, just follow
-        if gap > 50.0:
+        # If too far, just follow aggressively
+        if gap > 35.0:
             return TacticalAction(
                 discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
-                aggressiveness=0.7,
+                aggressiveness=0.85,
                 preference=PreferenceVector(
                     rho_v=0.05,
                     rho_n=0.0,
@@ -115,11 +115,11 @@ class HeuristicTacticalPolicy:
         right_clear = right_space > self.cfg.overtake_min_corridor
 
         if left_clear and (not right_clear or left_space > right_space):
-            tactic = DiscreteTactic.OVERTAKE_LEFT if gap < 25.0 else DiscreteTactic.PREPARE_OVERTAKE_LEFT
-            rho_n = min(1.0, left_space * 0.3) if gap < 25.0 else min(0.8, left_space * 0.3)
+            tactic = DiscreteTactic.OVERTAKE_LEFT if gap < 15.0 else DiscreteTactic.PREPARE_OVERTAKE_LEFT
+            rho_n = min(1.0, left_space * 0.3) if gap < 15.0 else min(0.8, left_space * 0.3)
         elif right_clear:
-            tactic = DiscreteTactic.OVERTAKE_RIGHT if gap < 25.0 else DiscreteTactic.PREPARE_OVERTAKE_RIGHT
-            rho_n = max(-1.0, -right_space * 0.3) if gap < 25.0 else max(-0.8, -right_space * 0.3)
+            tactic = DiscreteTactic.OVERTAKE_RIGHT if gap < 15.0 else DiscreteTactic.PREPARE_OVERTAKE_RIGHT
+            rho_n = max(-1.0, -right_space * 0.3) if gap < 15.0 else max(-0.8, -right_space * 0.3)
         else:
             # No room → follow
             return TacticalAction(
@@ -129,7 +129,7 @@ class HeuristicTacticalPolicy:
             )
 
         # Aggressiveness based on speed difference and gap
-        alpha = np.clip(0.5 + (obs.ego_V - target.V) / 20.0, 0.4, 0.9)
+        alpha = np.clip(0.5 + (obs.ego_V - target.V) / 20.0, 0.6, 0.95)
 
         # Consider P2P for close overtakes
         use_p2p = (gap < 15.0 and obs.p2p_available and

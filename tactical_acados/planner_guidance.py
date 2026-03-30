@@ -149,12 +149,12 @@ class TacticalToPlanner:
             elif action.lateral_intention == LateralIntention.RIGHT:
                 rho_n = min(rho_n, -1.0)
 
-        # Prepare Overate (Pull out): half offset
+        # Prepare Overate (Pull out): much wider offset
         if action.mode == TacticalMode.PREPARE_OVERTAKE:
             if action.lateral_intention == LateralIntention.LEFT:
-                rho_n = max(rho_n, 0.8) # half car width bias
+                rho_n = max(rho_n, 1.4)
             elif action.lateral_intention == LateralIntention.RIGHT:
-                rho_n = min(rho_n, -0.8)
+                rho_n = min(rho_n, -1.4)
 
         # Center modes: pull toward centerline
         if action.lateral_intention == LateralIntention.CENTER:
