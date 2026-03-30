@@ -390,7 +390,9 @@ class LocalRacinglinePlanner():
             )
 
         # solve OCP
-        self.solver.solve()
+        status = self.solver.solve()
+        if status not in [0, 2, 5]:  # 0=SUCCESS, 2=MAX_ITER
+            raise RuntimeError(f"ACADOS solver failed with status {status}")
 
         # extract solution
         X = np.zeros((N, 7))
