@@ -51,7 +51,7 @@ class HeuristicTacticalPolicy:
 
             if ahead and abs(ahead[0].delta_s) < 80.0:
                 action = self._overtake_decision(obs, ahead[0])
-            elif behind and abs(behind[0].delta_s) < 40.0 and behind[0].delta_V > 5.0:
+            elif behind and abs(behind[0].delta_s) < 40.0 and behind[0].delta_V < -5.0:
                 action = self._defend_decision(obs, behind[0])
             else:
                 action = self._race_line_action(obs)

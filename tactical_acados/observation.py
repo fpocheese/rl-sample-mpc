@@ -148,6 +148,9 @@ def build_observation(
     apex_idx = np.argmax(curvatures)
     dist_to_apex = float(apex_idx * 4.0)  # 200m / 50 points = 4m per point
 
+    ego_kappa = float(np.interp(s_ego, track_handler.s, track_handler.Omega_z, period=s_track_len))
+    ego_s_dot = ego_state['V'] * np.cos(ego_state.get('chi', 0.0)) / (1.0 - ego_state['n'] * ego_kappa)
+
     # Build opponent states
     opp_states = []
     for opp in opponents:
@@ -157,18 +160,22 @@ def build_observation(
             delta_s -= s_track_len
         elif delta_s < -s_track_len / 2:
             delta_s += s_track_len
+            
+        opp_kappa = float(np.interp(opp['s'], track_handler.s, track_handler.Omega_z, period=s_track_len))
+        opp_chi = opp.get('chi', 0.0)
+        opp_s_dot = opp['V'] * np.cos(opp_chi) / (1.0 - opp['n'] * opp_kappa)
 
         opp_state = OpponentState(
             vehicle_id=opp.get('id', -1),
             s=opp['s'],
             n=opp['n'],
-            V=opp['V'],
-            chi=opp.get('chi', 0.0),
+            V=opp_s_dot,
+            chi=opp_chi,
             x=opp.get('x', 0.0),
             y=opp.get('y', 0.0),
             delta_s=delta_s,
             delta_n=ego_state['n'] - opp['n'],
-            delta_V=ego_state['V'] - opp['V'],
+            delta_V=ego_s_dot - opp_s_dot,
             pred_s=opp.get('pred_s'),
             pred_n=opp.get('pred_n'),
             pred_x=opp.get('pred_x'),
@@ -182,7 +189,7 @@ def build_observation(
     obs = TacticalObservation(
         ego_s=s_ego,
         ego_n=ego_state['n'],
-        ego_V=ego_state['V'],
+        ego_V=ego_s_dot,
         ego_chi=ego_state['chi'],
         ego_ax=ego_state['ax'],
         ego_ay=ego_state['ay'],
