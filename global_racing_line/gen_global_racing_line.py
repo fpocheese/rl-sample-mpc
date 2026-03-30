@@ -6,9 +6,9 @@ import yaml
 import pandas as pd
 
 params = {
-    'track_name': 'mpcb_3d_rl_as_ref_smoothed',
-    'raceline_name': 'mpcb_3d_rl_as_ref',
-    'vehicle_name': 'dallaraAV21',
+    'track_name': 'yas_user_smoothed',
+    'raceline_name': 'yasnorth_3d_rl_as_ref',
+    'vehicle_name': 'eav25_car',
     'safety_distance': 0.5,  # safety distance to track bounds in m
     'gg_mode': 'diamond',  # polar, diamond
     'gg_margin': 0.1,

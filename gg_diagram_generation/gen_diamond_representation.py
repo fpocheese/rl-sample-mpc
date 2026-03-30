@@ -3,7 +3,7 @@ from casadi import *
 import multiprocessing
 from joblib import Parallel, delayed
 
-vehicle_name = 'dallaraAV21'
+vehicle_name = 'eav25_car'
 # paths
 dir_path = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(dir_path, '..', 'data')

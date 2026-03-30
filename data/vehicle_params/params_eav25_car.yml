@@ -1,0 +1,83 @@
+---
+vehicle_params:
+  # ========== 基本参数 ==========
+  m: 692.2              # 车辆质量 [kg]
+  h: 0.342              # 重心高度 [m]
+
+  # ========== 几何参数 ==========
+  w: 3.115              # 轴距 [m]
+  a: 1.78578              # 前轴到重心距离 [m]
+  b: 1.32922              # 后轴到重心距离 [m]
+  T: 1.6             # 轮距 [m]
+  total_width: 1.92          # 车辆总宽度 [m]
+  total_length: 5.2         # 车辆总长度 [m]
+
+  # ========== 动力参数 ==========
+  P_max: 500000         # 最大功率 [W]
+  v_max: 80.0           # 最大速度 [m/s] (降低以避免数值问题)
+
+  # ========== 空气动力学参数 ==========
+  rho: 1.225            # 空气密度 [kg/m³]
+  C_D_A: 1.27            # 阻力系数×面积 [m²] - 根据实际调整
+  C_Lf_A: 1.68084           # 前下压力系数×面积 [m²] - 如果有下压力则修改
+  C_Lr_A: 2.37916           # 后下压力系数×面积 [m²]
+
+  # ========== 转向参数 ==========
+  delta_max: 0.524       # 最大转向角 [rad] (30°)
+
+  # ========== 悬架参数 ==========
+  epsilon: 0.5          # 侧倾刚度比
+  gamma: 1              # 制动力分配比
+
+tire_params:
+  # ========== 前轮轮胎参数 (270/620R13 A005B) ==========
+  front:
+    # Magic Formula纵向参数
+    p_Cx_1: 1.933         # longitudinal shape factor
+    p_Dx_1: 2.284         # max longitudinal friction coefficient
+    p_Dx_2: -0.32356      # longitudinal friction load dependency factor
+    p_Ex_1: 0.4743        # longitudinal curvature factor
+    p_Kx_1: 48.05         # max longitudinal stiffness coefficient
+    p_Kx_3: 0.4773        # max longitudinal stiffness coefficient
+    lambda_mu_x: 0.8      # longitudinal scaling factor
+
+    # Magic Formula横向参数
+    p_Cy_1: 1.531         # lateral shape factor
+    p_Dy_1: 1.9156        # max lateral friction coefficient
+    p_Dy_2: -0.4091       # lateral friction load dependency factor
+    p_Ey_1: -0.09074      # lateral curvature factor
+    p_Ky_1: -37.766       # max lateral stiffness coefficient
+    p_Ky_2: 1.6747        # max lateral stiffness coefficient
+    lambda_mu_y: 0.8      # lateral scaling factor
+
+    # 轮胎载荷参数
+    N_0: 3000             # 标称载荷 [N] - 来自官方 .tir 文件
+    N_max: 15000          # 最大允许轮胎载荷 [N] - 需覆盖高速下压力+载荷转移
+
+  # ========== 后轮轮胎参数 (360/620R13 A005A) ==========
+  rear:
+    # Magic Formula纵向参数
+    p_Cx_1: 1.6144        # longitudinal shape factor
+    p_Dx_1: 2.2345        # max longitudinal friction coefficient
+    p_Dx_2: -0.25554      # longitudinal friction load dependency factor
+    p_Ex_1: 0.2833        # longitudinal curvature factor
+    p_Kx_1: 51.67         # max longitudinal stiffness coefficient
+    p_Kx_3: 0.2546        # max longitudinal stiffness coefficient
+    lambda_mu_x: 0.8      # longitudinal scaling factor
+
+    # Magic Formula横向参数
+    p_Cy_1: 1.5998        # lateral shape factor
+    p_Dy_1: 1.9745        # max lateral friction coefficient
+    p_Dy_2: -0.4787       # lateral friction load dependency factor
+    p_Ey_1: -0.17632      # lateral curvature factor
+    p_Ky_1: -44.68        # max lateral stiffness coefficient
+    p_Ky_2: 2.269         # max lateral stiffness coefficient
+    lambda_mu_y: 0.8      # lateral scaling factor
+
+    # 轮胎载荷参数
+    N_0: 4000             # 标称载荷 [N] - 来自官方 .tir 文件
+    N_max: 18000          # 最大允许轮胎载荷 [N] - 需覆盖高速下压力+载荷转移
+
+  # ========== 滑移率限制 ==========
+  kappa_max: 1.0        # NLP搜索上界(非工作点), calc_max_slip_map会在[0,kappa_max]内找最优
+  lambda_max: 1.0       # NLP搜索上界(非工作点), calc_max_slip_map会在[0,lambda_max]内找最优

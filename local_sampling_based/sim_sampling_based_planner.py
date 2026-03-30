@@ -11,17 +11,19 @@ zoom_on_ego = True
 zoom_margin = 20.0
 
 # choose one of the experiments below or create own experiment under experiments/
-experiment = 'ex1_relative_trajectory_generation_mpcb'
+experiment = os.getenv('PLANNER_EXPERIMENT', 'ex1_relative_trajectory_generation_yasnorth')
 
 # experiment 1
 # experiment = 'ex1_relative_trajectory_generation_lvms'
 # experiment = 'ex1_relative_trajectory_generation_mpcb'
+# experiment = 'ex1_relative_trajectory_generation_yasnorth'
 # experiment = 'ex1_jerk_optimal_trajectory_generation_lvms'
 # experiment = 'ex1_jerk_optimal_trajectory_generation_mpcb'
 
 # experiment 2
 # experiment = 'ex2_overtake_lvms_3d'
 # experiment = 'ex2_overtake_lvms_2d'
+# experiment = 'ex2_overtake_yasnorth'
 
 # experiment 3
 # experiment = 'ex3_online_racing_line_solo_lvms'

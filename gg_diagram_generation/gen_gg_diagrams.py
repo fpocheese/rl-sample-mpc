@@ -1,16 +1,17 @@
 import os
+import numpy as np
 import yaml
 from casadi import *
-from calc_max_slip_map import calc_max_slip_map
+from calc_max_slip_map import calc_max_slip_map, resolve_tire_params
 import multiprocessing
 from joblib import Parallel, delayed
 
 # settings
-vehicle_name = 'dallaraAV21'
+vehicle_name = 'eav25_car'
 
 # discretization of total velocity
 V_min = 10.0  # in m/s
-V_max = 90.0  # in m/s
+V_max = 80.0  # in m/s
 V_N = 20
 
 # discretization of g tilde
@@ -37,15 +38,23 @@ with open(vehicle_params_path, 'r') as stream:
     params = yaml.safe_load(stream)
 vehicle_params = params['vehicle_params']
 tire_params = params['tire_params']
+front_tire_params = resolve_tire_params(tire_params=tire_params, axle='front')
+rear_tire_params = resolve_tire_params(tire_params=tire_params, axle='rear')
 
 # calculate maximum slip maps for normal loads
-N_list, kappa_max_list, lambda_max_list = calc_max_slip_map(tire_params=tire_params)
-kappa_max = interpolant("kappa_max", "bspline", [N_list], np.abs(kappa_max_list))
-lambda_max = interpolant("lambda_max", "bspline", [N_list], np.abs(lambda_max_list))
+N_list_front, kappa_max_list_front, lambda_max_list_front = calc_max_slip_map(tire_params=front_tire_params)
+N_list_rear, kappa_max_list_rear, lambda_max_list_rear = calc_max_slip_map(tire_params=rear_tire_params)
+kappa_max_front = interpolant("kappa_max_front", "bspline", [N_list_front], np.abs(kappa_max_list_front))
+lambda_max_front = interpolant("lambda_max_front", "bspline", [N_list_front], np.abs(lambda_max_list_front))
+kappa_max_rear = interpolant("kappa_max_rear", "bspline", [N_list_rear], np.abs(kappa_max_list_rear))
+lambda_max_rear = interpolant("lambda_max_rear", "bspline", [N_list_rear], np.abs(lambda_max_list_rear))
 
 
 # function to calculate ax, ay points for given absolute velocity and g-force base don two-track model
 def calc_gg_points(V, g_force, alpha_list):
+    front = front_tire_params
+    rear = rear_tire_params
+
     # variables with scaling factors
     a_x_n = MX.sym("a_x_n")  # longitudinal acceleration
     a_x_s = 50.0
@@ -69,7 +78,8 @@ def calc_gg_points(V, g_force, alpha_list):
     N_fr_n = MX.sym("N_fr_n")  # normal force tire front right
     N_rl_n = MX.sym("N_rl_n")  # normal force tire rear left
     N_rr_n = MX.sym("N_rr_n")  # normal force tire rear right
-    N_fl_s = N_fr_s = N_rl_s = N_rr_s = tire_params["N_0"] * 4
+    N_fl_s = N_fr_s = front["N_0"] * 4
+    N_rl_s = N_rr_s = rear["N_0"] * 4
     N_fl = N_fl_n * N_fl_s
     N_fr = N_fr_n * N_fr_s
     N_rl = N_rl_n * N_rl_s
@@ -99,7 +109,8 @@ def calc_gg_points(V, g_force, alpha_list):
     kappa_fr_n = MX.sym("kappa_fr_n")  # longitudinal slip front right
     kappa_rl_n = MX.sym("kappa_rl_n")  # longitudinal slip rear left
     kappa_rr_n = MX.sym("kappa_rr_n")  # longitudinal slip rear right
-    kappa_fl_s = kappa_fr_s = kappa_rl_s = kappa_rr_s = max(kappa_max_list) / 2
+    kappa_fl_s = kappa_fr_s = max(kappa_max_list_front) / 2
+    kappa_rl_s = kappa_rr_s = max(kappa_max_list_rear) / 2
     kappa_fl = kappa_fl_n * kappa_fl_s
     kappa_fr = kappa_fr_n * kappa_fr_s
     kappa_rl = kappa_rl_n * kappa_rl_s
@@ -108,7 +119,8 @@ def calc_gg_points(V, g_force, alpha_list):
     lambda_fr_n = MX.sym("lambda_fr_n")  # lateral slip front right
     lambda_rl_n = MX.sym("lambda_rl_n")  # lateral slip rear left
     lambda_rr_n = MX.sym("lambda_rr_n")  # lateral slip rear right
-    lambda_fl_s = lambda_fr_s = lambda_rl_s = lambda_rr_s = max(lambda_max_list) / 2
+    lambda_fl_s = lambda_fr_s = max(lambda_max_list_front) / 2
+    lambda_rl_s = lambda_rr_s = max(lambda_max_list_rear) / 2
     lambda_fl = lambda_fl_n * lambda_fl_s
     lambda_fr = lambda_fr_n * lambda_fr_s
     lambda_rl = lambda_rl_n * lambda_rl_s
@@ -185,10 +197,10 @@ def calc_gg_points(V, g_force, alpha_list):
     F_Lr = 0.5 * vehicle_params["rho"] * vehicle_params["C_Lr_A"] * u**2  # rear downforce
 
     #
-    df_z_fl = (N_fl - tire_params["N_0"]) / tire_params["N_0"]
-    df_z_fr = (N_fr - tire_params["N_0"]) / tire_params["N_0"]
-    df_z_rl = (N_rl - tire_params["N_0"]) / tire_params["N_0"]
-    df_z_rr = (N_rr - tire_params["N_0"]) / tire_params["N_0"]
+    df_z_fl = (N_fl - front["N_0"]) / front["N_0"]
+    df_z_fr = (N_fr - front["N_0"]) / front["N_0"]
+    df_z_rl = (N_rl - rear["N_0"]) / rear["N_0"]
+    df_z_rr = (N_rr - rear["N_0"]) / rear["N_0"]
 
     # theoretical slips
     sigma_x_fl = kappa_fl / (1 + kappa_fl)
@@ -207,57 +219,58 @@ def calc_gg_points(V, g_force, alpha_list):
     sigma_rr = sqrt(sigma_x_rr**2 + sigma_y_rr**2)
 
     # magic formula coefficients (longitudinal)
-    K_x_fl = N_fl * tire_params["p_Kx_1"] * exp(tire_params["p_Kx_3"] * df_z_fl)
-    K_x_fr = N_fr * tire_params["p_Kx_1"] * exp(tire_params["p_Kx_3"] * df_z_fr)
-    K_x_rl = N_rl * tire_params["p_Kx_1"] * exp(tire_params["p_Kx_3"] * df_z_rl)
-    K_x_rr = N_rr * tire_params["p_Kx_1"] * exp(tire_params["p_Kx_3"] * df_z_rr)
+    K_x_fl = N_fl * front["p_Kx_1"] * exp(front["p_Kx_3"] * df_z_fl)
+    K_x_fr = N_fr * front["p_Kx_1"] * exp(front["p_Kx_3"] * df_z_fr)
+    K_x_rl = N_rl * rear["p_Kx_1"] * exp(rear["p_Kx_3"] * df_z_rl)
+    K_x_rr = N_rr * rear["p_Kx_1"] * exp(rear["p_Kx_3"] * df_z_rr)
 
-    D_x_fl = (tire_params["p_Dx_1"] + tire_params["p_Dx_2"] * df_z_fl) * tire_params["lambda_mu_x"]
-    D_x_fr = (tire_params["p_Dx_1"] + tire_params["p_Dx_2"] * df_z_fr) * tire_params["lambda_mu_x"]
-    D_x_rl = (tire_params["p_Dx_1"] + tire_params["p_Dx_2"] * df_z_rl) * tire_params["lambda_mu_x"]
-    D_x_rr = (tire_params["p_Dx_1"] + tire_params["p_Dx_2"] * df_z_rr) * tire_params["lambda_mu_x"]
+    D_x_fl = (front["p_Dx_1"] + front["p_Dx_2"] * df_z_fl) * front["lambda_mu_x"]
+    D_x_fr = (front["p_Dx_1"] + front["p_Dx_2"] * df_z_fr) * front["lambda_mu_x"]
+    D_x_rl = (rear["p_Dx_1"] + rear["p_Dx_2"] * df_z_rl) * rear["lambda_mu_x"]
+    D_x_rr = (rear["p_Dx_1"] + rear["p_Dx_2"] * df_z_rr) * rear["lambda_mu_x"]
 
-    B_x_fl = K_x_fl / (tire_params["p_Cx_1"] * D_x_fl * N_fl)
-    B_x_fr = K_x_fr / (tire_params["p_Cx_1"] * D_x_fr * N_fr)
-    B_x_rl = K_x_rl / (tire_params["p_Cx_1"] * D_x_rl * N_rl)
-    B_x_rr = K_x_rr / (tire_params["p_Cx_1"] * D_x_rr * N_rr)
+    B_x_fl = K_x_fl / (front["p_Cx_1"] * D_x_fl * N_fl)
+    B_x_fr = K_x_fr / (front["p_Cx_1"] * D_x_fr * N_fr)
+    B_x_rl = K_x_rl / (rear["p_Cx_1"] * D_x_rl * N_rl)
+    B_x_rr = K_x_rr / (rear["p_Cx_1"] * D_x_rr * N_rr)
 
     # magic formula coefficients (lateral)
     K_y_fl = (
-        tire_params["N_0"]
-        * tire_params["p_Ky_1"]
-        * sin(2 * arctan(N_fl / (tire_params["p_Ky_2"] * tire_params["N_0"])))
+        front["N_0"]
+        * front["p_Ky_1"]
+        * sin(2 * arctan(N_fl / (front["p_Ky_2"] * front["N_0"])))
     )
     K_y_fr = (
-        tire_params["N_0"]
-        * tire_params["p_Ky_1"]
-        * sin(2 * arctan(N_fr / (tire_params["p_Ky_2"] * tire_params["N_0"])))
+        front["N_0"]
+        * front["p_Ky_1"]
+        * sin(2 * arctan(N_fr / (front["p_Ky_2"] * front["N_0"])))
     )
     K_y_rl = (
-        tire_params["N_0"]
-        * tire_params["p_Ky_1"]
-        * sin(2 * arctan(N_rl / (tire_params["p_Ky_2"] * tire_params["N_0"])))
+        rear["N_0"]
+        * rear["p_Ky_1"]
+        * sin(2 * arctan(N_rl / (rear["p_Ky_2"] * rear["N_0"])))
     )
     K_y_rr = (
-        tire_params["N_0"]
-        * tire_params["p_Ky_1"]
-        * sin(2 * arctan(N_rr / (tire_params["p_Ky_2"] * tire_params["N_0"])))
+        rear["N_0"]
+        * rear["p_Ky_1"]
+        * sin(2 * arctan(N_rr / (rear["p_Ky_2"] * rear["N_0"])))
     )
 
-    D_y_fl = (tire_params["p_Dy_1"] + tire_params["p_Dy_2"] * df_z_fl) * tire_params["lambda_mu_y"]
-    D_y_fr = (tire_params["p_Dy_1"] + tire_params["p_Dy_2"] * df_z_fr) * tire_params["lambda_mu_y"]
-    D_y_rl = (tire_params["p_Dy_1"] + tire_params["p_Dy_2"] * df_z_rl) * tire_params["lambda_mu_y"]
-    D_y_rr = (tire_params["p_Dy_1"] + tire_params["p_Dy_2"] * df_z_rr) * tire_params["lambda_mu_y"]
+    D_y_fl = (front["p_Dy_1"] + front["p_Dy_2"] * df_z_fl) * front["lambda_mu_y"]
+    D_y_fr = (front["p_Dy_1"] + front["p_Dy_2"] * df_z_fr) * front["lambda_mu_y"]
+    D_y_rl = (rear["p_Dy_1"] + rear["p_Dy_2"] * df_z_rl) * rear["lambda_mu_y"]
+    D_y_rr = (rear["p_Dy_1"] + rear["p_Dy_2"] * df_z_rr) * rear["lambda_mu_y"]
 
-    B_y_fl = K_y_fl / (tire_params["p_Cy_1"] * D_y_fl * N_fl)
-    B_y_fr = K_y_fr / (tire_params["p_Cy_1"] * D_y_fr * N_fr)
-    B_y_rl = K_y_rl / (tire_params["p_Cy_1"] * D_y_rl * N_rl)
-    B_y_rr = K_y_rr / (tire_params["p_Cy_1"] * D_y_rr * N_rr)
+    B_y_fl = K_y_fl / (front["p_Cy_1"] * D_y_fl * N_fl)
+    B_y_fr = K_y_fr / (front["p_Cy_1"] * D_y_fr * N_fr)
+    B_y_rl = K_y_rl / (rear["p_Cy_1"] * D_y_rl * N_rl)
+    B_y_rr = K_y_rr / (rear["p_Cy_1"] * D_y_rr * N_rr)
 
     # initial guess (maximum positive ax, ay to zero)
     ax0 = vehicle_params["P_max"] / V / vehicle_params["m"]
     Fx0 = vehicle_params["m"] * ax0
-    N_ij0 = tire_params["N_0"]
+    N_ij0_front = front["N_0"]
+    N_ij0_rear = rear["N_0"]
     x0 = vertcat(
         ax0,
         0.0,
@@ -265,10 +278,10 @@ def calc_gg_points(V, g_force, alpha_list):
         0.01,
         0.0,
         0.0,
-        N_ij0,
-        N_ij0,
-        N_ij0,
-        N_ij0,
+        N_ij0_front,
+        N_ij0_front,
+        N_ij0_rear,
+        N_ij0_rear,
         Fx0,
         0.0,
         0.0,
@@ -313,36 +326,36 @@ def calc_gg_points(V, g_force, alpha_list):
 
         # minimum and maximum lateral slip
         g += [
-            lambda_fl + lambda_max(N_fl),
-            lambda_fr + lambda_max(N_fr),
-            lambda_rl + lambda_max(N_rl),
-            lambda_rr + lambda_max(N_rr),
+            lambda_fl + lambda_max_front(N_fl),
+            lambda_fr + lambda_max_front(N_fr),
+            lambda_rl + lambda_max_rear(N_rl),
+            lambda_rr + lambda_max_rear(N_rr),
         ]
         lbg += [0.0, 0.0, 0.0, 0.0]
         ubg += [np.inf, np.inf, np.inf, np.inf]
         g += [
-            lambda_fl - lambda_max(N_fl),
-            lambda_fr - lambda_max(N_fr),
-            lambda_rl - lambda_max(N_rl),
-            lambda_rr - lambda_max(N_rr),
+            lambda_fl - lambda_max_front(N_fl),
+            lambda_fr - lambda_max_front(N_fr),
+            lambda_rl - lambda_max_rear(N_rl),
+            lambda_rr - lambda_max_rear(N_rr),
         ]
         lbg += [-np.inf, -np.inf, -np.inf, -np.inf]
         ubg += [0.0, 0.0, 0.0, 0.0]
 
         # minimum and maximum longitudinal slip
         g += [
-            kappa_fl + kappa_max(N_fl),
-            kappa_fr + kappa_max(N_fr),
-            kappa_rl + kappa_max(N_rl),
-            kappa_rr + kappa_max(N_rr),
+            kappa_fl + kappa_max_front(N_fl),
+            kappa_fr + kappa_max_front(N_fr),
+            kappa_rl + kappa_max_rear(N_rl),
+            kappa_rr + kappa_max_rear(N_rr),
         ]
         lbg += [0.0, 0.0, 0.0, 0.0]
         ubg += [np.inf, np.inf, np.inf, np.inf]
         g += [
-            kappa_fl - kappa_max(N_fl),
-            kappa_fr - kappa_max(N_fr),
-            kappa_rl - kappa_max(N_rl),
-            kappa_rr - kappa_max(N_rr),
+            kappa_fl - kappa_max_front(N_fl),
+            kappa_fr - kappa_max_front(N_fr),
+            kappa_rl - kappa_max_rear(N_rl),
+            kappa_rr - kappa_max_rear(N_rr),
         ]
         lbg += [-np.inf, -np.inf, -np.inf, -np.inf]
         ubg += [0.0, 0.0, 0.0, 0.0]
@@ -350,91 +363,91 @@ def calc_gg_points(V, g_force, alpha_list):
         # magic formula as constraints
         g += [
             F_x_fl
-            - N_fl
-            * sigma_x_fl
-            / sigma_fl
-            * D_x_fl
-            * sin(
-                tire_params["p_Cx_1"]
-                * arctan(B_x_fl * sigma_fl - tire_params["p_Ex_1"] * (B_x_fl * sigma_fl - arctan(B_x_fl * sigma_fl)))
+                - N_fl
+                * sigma_x_fl
+                / sigma_fl
+                * D_x_fl
+                * sin(
+                front["p_Cx_1"]
+                * arctan(B_x_fl * sigma_fl - front["p_Ex_1"] * (B_x_fl * sigma_fl - arctan(B_x_fl * sigma_fl)))
             )
         ]
         g += [
             F_x_fr
-            - N_fr
-            * sigma_x_fr
-            / sigma_fr
-            * D_x_fr
-            * sin(
-                tire_params["p_Cx_1"]
-                * arctan(B_x_fr * sigma_fr - tire_params["p_Ex_1"] * (B_x_fr * sigma_fr - arctan(B_x_fr * sigma_fr)))
+                - N_fr
+                * sigma_x_fr
+                / sigma_fr
+                * D_x_fr
+                * sin(
+                front["p_Cx_1"]
+                * arctan(B_x_fr * sigma_fr - front["p_Ex_1"] * (B_x_fr * sigma_fr - arctan(B_x_fr * sigma_fr)))
             )
         ]
         g += [
             F_x_rl
-            - N_rl
-            * sigma_x_rl
-            / sigma_rl
-            * D_x_rl
-            * sin(
-                tire_params["p_Cx_1"]
-                * arctan(B_x_rl * sigma_rl - tire_params["p_Ex_1"] * (B_x_rl * sigma_rl - arctan(B_x_rl * sigma_rl)))
+                - N_rl
+                * sigma_x_rl
+                / sigma_rl
+                * D_x_rl
+                * sin(
+                rear["p_Cx_1"]
+                * arctan(B_x_rl * sigma_rl - rear["p_Ex_1"] * (B_x_rl * sigma_rl - arctan(B_x_rl * sigma_rl)))
             )
         ]
         g += [
             F_x_rr
-            - N_rr
-            * sigma_x_rr
-            / sigma_rr
-            * D_x_rr
-            * sin(
-                tire_params["p_Cx_1"]
-                * arctan(B_x_rr * sigma_rr - tire_params["p_Ex_1"] * (B_x_rr * sigma_rr - arctan(B_x_rr * sigma_rr)))
+                - N_rr
+                * sigma_x_rr
+                / sigma_rr
+                * D_x_rr
+                * sin(
+                rear["p_Cx_1"]
+                * arctan(B_x_rr * sigma_rr - rear["p_Ex_1"] * (B_x_rr * sigma_rr - arctan(B_x_rr * sigma_rr)))
             )
         ]
 
         g += [
             F_y_fl
-            - N_fl
-            * sigma_y_fl
-            / sigma_fl
-            * D_y_fl
-            * sin(
-                tire_params["p_Cy_1"]
-                * arctan(B_y_fl * sigma_fl - tire_params["p_Ey_1"] * (B_y_fl * sigma_fl - arctan(B_y_fl * sigma_fl)))
+                - N_fl
+                * sigma_y_fl
+                / sigma_fl
+                * D_y_fl
+                * sin(
+                front["p_Cy_1"]
+                * arctan(B_y_fl * sigma_fl - front["p_Ey_1"] * (B_y_fl * sigma_fl - arctan(B_y_fl * sigma_fl)))
             )
         ]
         g += [
             F_y_fr
-            - N_fr
-            * sigma_y_fr
-            / sigma_fr
-            * D_y_fr
-            * sin(
-                tire_params["p_Cy_1"]
-                * arctan(B_y_fr * sigma_fr - tire_params["p_Ey_1"] * (B_y_fr * sigma_fr - arctan(B_y_fr * sigma_fr)))
+                - N_fr
+                * sigma_y_fr
+                / sigma_fr
+                * D_y_fr
+                * sin(
+                front["p_Cy_1"]
+                * arctan(B_y_fr * sigma_fr - front["p_Ey_1"] * (B_y_fr * sigma_fr - arctan(B_y_fr * sigma_fr)))
             )
         ]
         g += [
             F_y_rl
-            - N_rl
-            * sigma_y_rl
-            / sigma_rl
-            * D_y_rl
-            * sin(
-                tire_params["p_Cy_1"]
-                * arctan(B_y_rl * sigma_rl - tire_params["p_Ey_1"] * (B_y_rl * sigma_rl - arctan(B_y_rl * sigma_rl)))
+                - N_rl
+                * sigma_y_rl
+                / sigma_rl
+                * D_y_rl
+                * sin(
+                rear["p_Cy_1"]
+                * arctan(B_y_rl * sigma_rl - rear["p_Ey_1"] * (B_y_rl * sigma_rl - arctan(B_y_rl * sigma_rl)))
             )
         ]
         g += [
             F_y_rr
-            - N_rr
-            * sigma_y_rr
-            / sigma_rr
-            * D_y_rr
-            * sin(
-                tire_params["p_Cy_1"]
-                * arctan(B_y_rr * sigma_rr - tire_params["p_Ey_1"] * (B_y_rr * sigma_rr - arctan(B_y_rr * sigma_rr)))
+                - N_rr
+                * sigma_y_rr
+                / sigma_rr
+                * D_y_rr
+                * sin(
+                rear["p_Cy_1"]
+                * arctan(B_y_rr * sigma_rr - rear["p_Ey_1"] * (B_y_rr * sigma_rr - arctan(B_y_rr * sigma_rr)))
             )
         ]
 
@@ -499,7 +512,7 @@ def calc_gg_points(V, g_force, alpha_list):
         # positive normal forces
         g += [N_fl, N_fr, N_rl, N_rr]
         lbg += [0.0, 0.0, 0.0, 0.0]
-        ubg += [tire_params["N_max"], tire_params["N_max"], tire_params["N_max"], tire_params["N_max"]]
+        ubg += [front["N_max"], front["N_max"], rear["N_max"], rear["N_max"]]
 
         # cost function
         f = - a_x**2 - a_y**2  # maximize substitute radius

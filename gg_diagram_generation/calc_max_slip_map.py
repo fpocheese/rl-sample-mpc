@@ -1,9 +1,29 @@
+import numpy as np
+
 from casadi import *
 from tqdm import tqdm
 
 
-def calc_max_slip_map(tire_params: dict, debug_plots: bool = False):
-    N_list = np.linspace(10.0, tire_params["N_max"], 100)
+def resolve_tire_params(tire_params: dict, axle: str | None = None) -> dict:
+    if "front" in tire_params and "rear" in tire_params:
+        if axle is None:
+            raise KeyError(
+                "Nested tire_params detected. Specify axle='front' or axle='rear' when calling calc_max_slip_map."
+            )
+        if axle not in tire_params:
+            raise KeyError(f"Unknown axle '{axle}'. Expected 'front' or 'rear'.")
+        resolved_params = dict(tire_params[axle])
+        for shared_key in ("kappa_max", "lambda_max"):
+            if shared_key not in tire_params:
+                raise KeyError(f"Shared tire parameter '{shared_key}' is missing from tire_params.")
+            resolved_params[shared_key] = tire_params[shared_key]
+        return resolved_params
+    return tire_params
+
+
+def calc_max_slip_map(tire_params: dict, debug_plots: bool = False, axle: str | None = None):
+    tire_params_resolved = resolve_tire_params(tire_params=tire_params, axle=axle)
+    N_list = np.linspace(10.0, tire_params_resolved["N_max"], 100)
     N_list_res = []
     kappa_max_list = []
     lambda_max_list = []
@@ -15,29 +35,29 @@ def calc_max_slip_map(tire_params: dict, debug_plots: bool = False):
     F_x = MX.sym("F_x")
     F_y = MX.sym("F_y")
 
-    x0_x = [0.1, 0, tire_params["N_0"], 0]
-    x0_y = [0, 0.1, 0, -tire_params["N_0"]]
+    x0_x = [0.1, 0, tire_params_resolved["N_0"], 0]
+    x0_y = [0, 0.1, 0, -tire_params_resolved["N_0"]]
 
     print(f"Calculating maximum slips for normal tire loads:\n")
     for i, N in tqdm(enumerate(N_list), total=len(N_list)):
 
-        df_z = (N - tire_params["N_0"]) / tire_params["N_0"]
+        df_z = (N - tire_params_resolved["N_0"]) / tire_params_resolved["N_0"]
 
         sigma_x = kappa / (1 + kappa)
         sigma_y = tan(lambdaa) / (1 + kappa)
         sigma = sqrt(sigma_x**2 + sigma_y**2)
 
-        K_x = N * tire_params["p_Kx_1"] * exp(tire_params["p_Kx_3"] * df_z)
-        D_x = (tire_params["p_Dx_1"] + tire_params["p_Dx_2"] * df_z) * tire_params["lambda_mu_x"]
-        B_x = K_x / (tire_params["p_Cx_1"] * D_x * N)
+        K_x = N * tire_params_resolved["p_Kx_1"] * exp(tire_params_resolved["p_Kx_3"] * df_z)
+        D_x = (tire_params_resolved["p_Dx_1"] + tire_params_resolved["p_Dx_2"] * df_z) * tire_params_resolved["lambda_mu_x"]
+        B_x = K_x / (tire_params_resolved["p_Cx_1"] * D_x * N)
 
         K_y = (
-            tire_params["N_0"]
-            * tire_params["p_Ky_1"]
-            * sin(2 * arctan(N / (tire_params["p_Ky_2"] * tire_params["N_0"])))
+            tire_params_resolved["N_0"]
+            * tire_params_resolved["p_Ky_1"]
+            * sin(2 * arctan(N / (tire_params_resolved["p_Ky_2"] * tire_params_resolved["N_0"])))
         )
-        D_y = (tire_params["p_Dy_1"] + tire_params["p_Dy_2"] * df_z) * tire_params["lambda_mu_y"]
-        B_y = K_y / (tire_params["p_Cy_1"] * D_y * N)
+        D_y = (tire_params_resolved["p_Dy_1"] + tire_params_resolved["p_Dy_2"] * df_z) * tire_params_resolved["lambda_mu_y"]
+        B_y = K_y / (tire_params_resolved["p_Cy_1"] * D_y * N)
 
         # constraints
         g = []
@@ -45,24 +65,24 @@ def calc_max_slip_map(tire_params: dict, debug_plots: bool = False):
         ubg = []
         g += [
             F_x
-            - N
-            * sigma_x
-            / sigma
-            * D_x
-            * sin(
-                tire_params["p_Cx_1"]
-                * arctan(B_x * sigma - tire_params["p_Ex_1"] * (B_x * sigma - arctan(B_x * sigma)))
+                - N
+                * sigma_x
+                / sigma
+                * D_x
+                * sin(
+                tire_params_resolved["p_Cx_1"]
+                * arctan(B_x * sigma - tire_params_resolved["p_Ex_1"] * (B_x * sigma - arctan(B_x * sigma)))
             )
         ]
         g += [
             F_y
-            - N
-            * sigma_y
-            / sigma
-            * D_y
-            * sin(
-                tire_params["p_Cy_1"]
-                * arctan(B_y * sigma - tire_params["p_Ey_1"] * (B_y * sigma - arctan(B_y * sigma)))
+                - N
+                * sigma_y
+                / sigma
+                * D_y
+                * sin(
+                tire_params_resolved["p_Cy_1"]
+                * arctan(B_y * sigma - tire_params_resolved["p_Ey_1"] * (B_y * sigma - arctan(B_y * sigma)))
             )
         ]
         lbg += [0, 0]
@@ -75,7 +95,7 @@ def calc_max_slip_map(tire_params: dict, debug_plots: bool = False):
         # NLP
         x = vertcat(kappa, lambdaa, F_x, F_y)
         lbx = vertcat(0, 0, 0, -np.inf)
-        ubx = vertcat(tire_params["kappa_max"], tire_params["lambda_max"], np.inf, 0)
+        ubx = vertcat(tire_params_resolved["kappa_max"], tire_params_resolved["lambda_max"], np.inf, 0)
         nlp_x = {"x": x, "f": f_x, "g": vertcat(*g)}
         nlp_y = {"x": x, "f": f_y, "g": vertcat(*g)}
 
