@@ -37,11 +37,13 @@ class HeuristicTacticalPolicy:
 
     def act(self, obs: TacticalObservation) -> TacticalAction:
         """Generate tactical action from observation."""
-        # High curvature → conservative follow
-        if obs.upcoming_max_curvature > 0.025:
-            action = self._conservative_action(obs)
-        elif not obs.opponents:
+        has_nearby = any(abs(opp.delta_s) < 80.0 for opp in obs.opponents)
+
+        if not has_nearby:
             action = self._solo_action(obs)
+        # High curvature → conservative follow (only if battling)
+        elif obs.upcoming_max_curvature > 0.025:
+            action = self._conservative_action(obs)
         else:
             # Find most relevant opponent
             ahead = [o for o in obs.opponents if o.delta_s < 0]
@@ -61,9 +63,9 @@ class HeuristicTacticalPolicy:
         """No relevant opponents → follow raceline aggressively."""
         return TacticalAction(
             discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
-            aggressiveness=0.8,
+            aggressiveness=1.0,
             preference=PreferenceVector(
-                rho_v=0.1,
+                rho_v=0.0,
                 rho_n=0.0,
                 rho_s=1.0,
                 rho_w=1.0,
