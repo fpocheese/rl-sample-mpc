@@ -83,8 +83,8 @@ class SafeTacticalWrapper:
         pref = action.preference.clip(cfg)
 
         # Context-dependent further restrictions
-        # In high curvature: reduce aggressiveness, increase safety margin
-        if obs.upcoming_max_curvature > 0.02:  # tight corner
+        # In high curvature: reduce aggressiveness, increase safety margin (unless purely solo racing)
+        if obs.upcoming_max_curvature > 0.02 and action.mode != TacticalMode.SOLO:  # tight corner
             alpha = min(alpha, 0.7)
             pref.rho_s = max(pref.rho_s, 1.0)
 
@@ -138,8 +138,9 @@ class SafeTacticalWrapper:
         mode = tactic.mode
         lateral = tactic.lateral_intention
 
-        # FOLLOW_CENTER is always feasible (fallback: follow nearest car)
-        if tactic == DiscreteTactic.FOLLOW_CENTER:
+        # FOLLOW_CENTER and RACE_LINE are always structurally conditionally feasible
+        # (Though we won't select RACE_LINE if cars are nearby, safe_wrapper allows it structurally)
+        if tactic in (DiscreteTactic.FOLLOW_CENTER, DiscreteTactic.RACE_LINE):
             return True
 
         # Overtake/Prepare checks

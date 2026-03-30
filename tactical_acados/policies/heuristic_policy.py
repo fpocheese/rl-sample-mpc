@@ -37,10 +37,10 @@ class HeuristicTacticalPolicy:
 
     def act(self, obs: TacticalObservation) -> TacticalAction:
         """Generate tactical action from observation."""
-        has_nearby = any(abs(opp.delta_s) < 80.0 for opp in obs.opponents)
+        has_nearby = any(abs(opp.delta_s) < 60.0 for opp in obs.opponents)
 
         if not has_nearby:
-            action = self._solo_action(obs)
+            action = self._race_line_action(obs)
         # High curvature → conservative follow (only if battling)
         elif obs.upcoming_max_curvature > 0.025:
             action = self._conservative_action(obs)
@@ -54,15 +54,15 @@ class HeuristicTacticalPolicy:
             elif behind and abs(behind[0].delta_s) < 40.0 and behind[0].delta_V > 5.0:
                 action = self._defend_decision(obs, behind[0])
             else:
-                action = self._solo_action(obs)
+                action = self._race_line_action(obs)
 
         # Always sanitize through safe wrapper
         return self.safe_wrapper.sanitize(action, obs)
 
-    def _solo_action(self, obs: TacticalObservation) -> TacticalAction:
-        """No relevant opponents → follow raceline aggressively."""
+    def _race_line_action(self, obs: TacticalObservation) -> TacticalAction:
+        """No relevant opponents → pure racing line untouched."""
         return TacticalAction(
-            discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
+            discrete_tactic=DiscreteTactic.RACE_LINE,
             aggressiveness=1.0,
             preference=PreferenceVector(
                 rho_v=0.0,
@@ -186,6 +186,8 @@ class HeuristicTacticalPolicy:
         temp_obs = obs
         if discrete_tactic == DiscreteTactic.FOLLOW_CENTER:
             return np.array([0.7, 0.05, 0.0, 1.0, 1.0])
+        elif discrete_tactic == DiscreteTactic.RACE_LINE:
+            return np.array([1.0, 0.0, 0.0, 1.0, 1.0])
         elif discrete_tactic == DiscreteTactic.OVERTAKE_LEFT:
             return np.array([0.8, 0.15, 0.8, 0.9, 1.3])
         elif discrete_tactic == DiscreteTactic.OVERTAKE_RIGHT:

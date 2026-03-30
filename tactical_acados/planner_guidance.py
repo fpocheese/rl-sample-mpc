@@ -78,6 +78,9 @@ class TacticalToPlanner:
     def _compute_speed_scale(self, action: TacticalAction,
                               obs: TacticalObservation) -> float:
         """Map aggressiveness + rho_v to speed scale."""
+        if action.mode == TacticalMode.SOLO:
+            return 1.0
+            
         base = 0.85 + 0.15 * action.aggressiveness  # [0.85, 1.0]
         bias = action.preference.rho_v  # [-0.25, 0.25]
         scale = base + bias
@@ -100,6 +103,9 @@ class TacticalToPlanner:
         """Compute absolute speed cap."""
         base_cap = 90.0  # m/s
 
+        if action.mode == TacticalMode.SOLO:
+            return base_cap
+            
         # High curvature: additional speed limit
         if obs.upcoming_max_curvature > 0.02:
             curv_cap = 1.0 / (obs.upcoming_max_curvature * 3.0)
@@ -110,6 +116,9 @@ class TacticalToPlanner:
     def _compute_safety_distance(self, action: TacticalAction,
                                   obs: TacticalObservation) -> float:
         """Map rho_s to effective safety distance."""
+        if action.mode == TacticalMode.SOLO:
+            return self.cfg.safety_distance_default
+            
         base = self.cfg.safety_distance_default  # 0.5m
         scale = action.preference.rho_s  # [0.7, 1.5]
         safety = base * scale
@@ -123,6 +132,9 @@ class TacticalToPlanner:
     def _compute_terminal_n(self, action: TacticalAction,
                              obs: TacticalObservation) -> float:
         """Compute terminal lateral target."""
+        if action.mode == TacticalMode.SOLO:
+            return 0.0
+            
         rho_n = action.preference.rho_n  # [-1.5, 1.5] meters
 
         if action.lateral_intention == LateralIntention.LEFT:
@@ -176,6 +188,9 @@ class TacticalToPlanner:
         veh_half = self.cfg.vehicle_width / 2.0
         n_left = w_left - veh_half - 0.2
         n_right = w_right + veh_half + 0.2
+
+        if action.mode == TacticalMode.SOLO:
+            return n_left, n_right
 
         # Carve corridor for each opponent
         for opp in obs.opponents:

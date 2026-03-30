@@ -25,6 +25,7 @@ class TacticalMode(IntEnum):
     OVERTAKE = 1
     DEFEND = 2
     PREPARE_OVERTAKE = 3
+    SOLO = 4
 
 
 class LateralIntention(IntEnum):
@@ -45,6 +46,7 @@ class DiscreteTactic(IntEnum):
     DEFEND_RIGHT = 4
     PREPARE_OVERTAKE_LEFT = 5
     PREPARE_OVERTAKE_RIGHT = 6
+    RACE_LINE = 7
 
     @property
     def mode(self) -> TacticalMode:
@@ -63,6 +65,7 @@ _DISCRETE_TO_MODE = {
     4: TacticalMode.DEFEND,
     5: TacticalMode.PREPARE_OVERTAKE,
     6: TacticalMode.PREPARE_OVERTAKE,
+    7: TacticalMode.SOLO,
 }
 _DISCRETE_TO_LATERAL = {
     0: LateralIntention.CENTER,
@@ -72,6 +75,7 @@ _DISCRETE_TO_LATERAL = {
     4: LateralIntention.RIGHT,
     5: LateralIntention.LEFT,
     6: LateralIntention.RIGHT,
+    7: LateralIntention.CENTER,
 }
 
 NUM_DISCRETE_ACTIONS = len(DiscreteTactic)
@@ -201,10 +205,10 @@ def get_fallback_action() -> TacticalAction:
     No autonomous slowdown — always keep racing, just follow safely.
     """
     return TacticalAction(
-        discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
-        aggressiveness=0.3,
+        discrete_tactic=DiscreteTactic.RACE_LINE,
+        aggressiveness=1.0,
         preference=PreferenceVector(
-            rho_v=-0.2, rho_n=0.0, rho_s=1.5, rho_w=1.0
+            rho_v=0.0, rho_n=0.0, rho_s=1.0, rho_w=1.0
         ),
         p2p_trigger=False,
     )
