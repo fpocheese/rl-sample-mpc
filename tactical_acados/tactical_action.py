@@ -24,7 +24,7 @@ class TacticalMode(IntEnum):
     FOLLOW = 0
     OVERTAKE = 1
     DEFEND = 2
-    RECOVER = 3
+    PREPARE_OVERTAKE = 3
 
 
 class LateralIntention(IntEnum):
@@ -43,7 +43,8 @@ class DiscreteTactic(IntEnum):
     OVERTAKE_RIGHT = 2
     DEFEND_LEFT = 3
     DEFEND_RIGHT = 4
-    RECOVER_CENTER = 5
+    PREPARE_OVERTAKE_LEFT = 5
+    PREPARE_OVERTAKE_RIGHT = 6
 
     @property
     def mode(self) -> TacticalMode:
@@ -60,7 +61,8 @@ _DISCRETE_TO_MODE = {
     2: TacticalMode.OVERTAKE,
     3: TacticalMode.DEFEND,
     4: TacticalMode.DEFEND,
-    5: TacticalMode.RECOVER,
+    5: TacticalMode.PREPARE_OVERTAKE,
+    6: TacticalMode.PREPARE_OVERTAKE,
 }
 _DISCRETE_TO_LATERAL = {
     0: LateralIntention.CENTER,
@@ -68,7 +70,8 @@ _DISCRETE_TO_LATERAL = {
     2: LateralIntention.RIGHT,
     3: LateralIntention.LEFT,
     4: LateralIntention.RIGHT,
-    5: LateralIntention.CENTER,
+    5: LateralIntention.LEFT,
+    6: LateralIntention.RIGHT,
 }
 
 NUM_DISCRETE_ACTIONS = len(DiscreteTactic)
@@ -199,8 +202,10 @@ def get_fallback_action() -> TacticalAction:
     """
     return TacticalAction(
         discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
-        aggressiveness=0.5,
-        preference=PreferenceVector(rho_v=0.0, rho_n=0.0, rho_s=1.2, rho_w=1.0),
+        aggressiveness=0.3,
+        preference=PreferenceVector(
+            rho_v=-0.2, rho_n=0.0, rho_s=1.5, rho_w=1.0
+        ),
         p2p_trigger=False,
     )
 

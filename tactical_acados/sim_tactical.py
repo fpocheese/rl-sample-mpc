@@ -187,23 +187,25 @@ def run_tactical_simulation(
         # Step 4: Map tactical action to planner guidance
         guidance = tactical_mapper.map(action, obs, N_stages=cfg.N_steps_acados)
 
-        # Step 4.5: If FOLLOW mode, apply follow module
+        # Step 4.5: If FOLLOW or PREPARE_OVERTAKE mode, apply follow module
         from tactical_action import TacticalMode
-        if action.mode == TacticalMode.FOLLOW and opponents:
+        if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and opponents:
             leader = follow_mod.find_nearest_car(ego_state['s'], opp_states)
             if leader is not None:
                 follow_mods = follow_mod.get_follow_guidance_modifiers(ego_state, leader)
                 guidance.speed_scale = min(guidance.speed_scale, follow_mods['speed_scale'])
                 guidance.speed_cap = min(guidance.speed_cap, follow_mods['speed_cap'])
-                guidance.terminal_n_target = follow_mods['terminal_n_target']
+                # Only strictly track leader laterally if purely following
+                if action.mode == TacticalMode.FOLLOW:
+                    guidance.terminal_n_target = follow_mods['terminal_n_target']
                 guidance.safety_distance = max(guidance.safety_distance, follow_mods['safety_distance'])
                 guidance.follow_target_id = follow_mods['follow_target_id']
 
         # Step 5: Plan with ACADOS
         trajectory = planner.plan(ego_state, guidance)
 
-        # Step 5.5: If FOLLOW mode, apply follow post-processing
-        if action.mode == TacticalMode.FOLLOW and opponents:
+        # Step 5.5: If FOLLOW or PREPARE_OVERTAKE mode, apply follow post-processing
+        if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and opponents:
             leader = follow_mod.find_nearest_car(ego_state['s'], opp_states)
             if leader is not None:
                 trajectory = follow_mod.post_process_trajectory(trajectory, ego_state, leader)
@@ -275,7 +277,7 @@ if __name__ == '__main__':
     # ============================================================
     # Configure simulation settings here (no CLI args needed)
     # ============================================================
-    SCENARIO = 'scenario_b'     # 'scenario_a', 'scenario_b', 'scenario_c'
+    SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
     VISUALIZE = True            # Set to False for headless mode
     MAX_STEPS = 999999          # Set very large for unlimited
     POLICY = 'heuristic'        # 'heuristic' or 'random'

@@ -37,9 +37,9 @@ class HeuristicTacticalPolicy:
 
     def act(self, obs: TacticalObservation) -> TacticalAction:
         """Generate tactical action from observation."""
-        # High curvature → recover
+        # High curvature → conservative follow
         if obs.upcoming_max_curvature > 0.025:
-            action = self._recover_action(obs)
+            action = self._conservative_action(obs)
         elif not obs.opponents:
             action = self._solo_action(obs)
         else:
@@ -71,10 +71,10 @@ class HeuristicTacticalPolicy:
             p2p_trigger=False,
         )
 
-    def _recover_action(self, obs: TacticalObservation) -> TacticalAction:
-        """High curvature → conservative recovery."""
+    def _conservative_action(self, obs: TacticalObservation) -> TacticalAction:
+        """High curvature → conservative following."""
         return TacticalAction(
-            discrete_tactic=DiscreteTactic.RECOVER_CENTER,
+            discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
             aggressiveness=0.3,
             preference=PreferenceVector(
                 rho_v=-0.1,
@@ -113,11 +113,11 @@ class HeuristicTacticalPolicy:
         right_clear = right_space > self.cfg.overtake_min_corridor
 
         if left_clear and (not right_clear or left_space > right_space):
-            tactic = DiscreteTactic.OVERTAKE_LEFT
-            rho_n = min(1.0, left_space * 0.3)
+            tactic = DiscreteTactic.OVERTAKE_LEFT if gap < 25.0 else DiscreteTactic.PREPARE_OVERTAKE_LEFT
+            rho_n = min(1.0, left_space * 0.3) if gap < 25.0 else min(0.8, left_space * 0.3)
         elif right_clear:
-            tactic = DiscreteTactic.OVERTAKE_RIGHT
-            rho_n = max(-1.0, -right_space * 0.3)
+            tactic = DiscreteTactic.OVERTAKE_RIGHT if gap < 25.0 else DiscreteTactic.PREPARE_OVERTAKE_RIGHT
+            rho_n = max(-1.0, -right_space * 0.3) if gap < 25.0 else max(-0.8, -right_space * 0.3)
         else:
             # No room → follow
             return TacticalAction(
@@ -192,7 +192,9 @@ class HeuristicTacticalPolicy:
             return np.array([0.6, 0.0, 0.5, 1.1, 1.5])
         elif discrete_tactic == DiscreteTactic.DEFEND_RIGHT:
             return np.array([0.6, 0.0, -0.5, 1.1, 1.5])
-        elif discrete_tactic == DiscreteTactic.RECOVER_CENTER:
-            return np.array([0.3, -0.1, 0.0, 1.3, 1.5])
+        elif discrete_tactic == DiscreteTactic.PREPARE_OVERTAKE_LEFT:
+            return np.array([0.75, 0.1, 0.8, 1.0, 1.2])
+        elif discrete_tactic == DiscreteTactic.PREPARE_OVERTAKE_RIGHT:
+            return np.array([0.75, 0.1, -0.8, 1.0, 1.2])
         else:
             return np.array([0.5, 0.0, 0.0, 1.0, 1.0])

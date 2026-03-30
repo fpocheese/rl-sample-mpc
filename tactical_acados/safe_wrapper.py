@@ -142,13 +142,8 @@ class SafeTacticalWrapper:
         if tactic == DiscreteTactic.FOLLOW_CENTER:
             return True
 
-        # RECOVER_CENTER: only feasible if no opponents nearby
-        if tactic == DiscreteTactic.RECOVER_CENTER:
-            has_nearby = any(abs(o.delta_s) < 50 for o in obs.opponents)
-            return not has_nearby  # don't slow down if cars nearby
-
-        # Overtake checks
-        if mode == TacticalMode.OVERTAKE:
+        # Overtake/Prepare checks
+        if mode in (TacticalMode.OVERTAKE, TacticalMode.PREPARE_OVERTAKE):
             # Need an opponent ahead to overtake
             has_opp_ahead = any(
                 opp.delta_s < 0 and abs(opp.delta_s) < 100.0

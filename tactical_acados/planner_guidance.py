@@ -66,8 +66,8 @@ class TacticalToPlanner:
         guidance.n_left_override = n_left
         guidance.n_right_override = n_right
 
-        # --- Follow target ---
-        if action.mode == TacticalMode.FOLLOW and obs.opponents:
+        # --- Follow or Prepare Overtake target ---
+        if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and obs.opponents:
             # Find closest opponent ahead
             ahead = [o for o in obs.opponents if o.delta_s < 0]
             if ahead:
@@ -82,18 +82,16 @@ class TacticalToPlanner:
         bias = action.preference.rho_v  # [-0.25, 0.25]
         scale = base + bias
 
-        # Following mode: reduce speed behind opponent
-        if action.mode == TacticalMode.FOLLOW:
+        # Following or Pull-out mode: reduce speed behind opponent
+        if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE):
             ahead = [o for o in obs.opponents if o.delta_s < 0]
             if ahead:
                 gap = abs(ahead[0].delta_s)
                 if gap < 20.0:
-                    follow_scale = 0.7 + 0.3 * (gap / 20.0)
+                    # PREPARE_OVERTAKE is slightly more aggressive than pure FOLLOW
+                    aggression_modifier = 0.05 if action.mode == TacticalMode.PREPARE_OVERTAKE else 0.0
+                    follow_scale = 0.7 + 0.3 * (gap / 20.0) + aggression_modifier
                     scale = min(scale, follow_scale)
-
-        # Recovery mode: reduce speed
-        if action.mode == TacticalMode.RECOVER:
-            scale = min(scale, 0.85)
 
         return float(np.clip(scale, 0.6, 1.15))
 
@@ -115,10 +113,6 @@ class TacticalToPlanner:
         base = self.cfg.safety_distance_default  # 0.5m
         scale = action.preference.rho_s  # [0.7, 1.5]
         safety = base * scale
-
-        # Recovery: increase safety margin
-        if action.mode == TacticalMode.RECOVER:
-            safety = max(safety, base * 1.3)
 
         # Overtake: allow slightly reduced margin on passing side
         if action.mode == TacticalMode.OVERTAKE:
@@ -142,6 +136,13 @@ class TacticalToPlanner:
                 rho_n = max(rho_n, 1.0)
             elif action.lateral_intention == LateralIntention.RIGHT:
                 rho_n = min(rho_n, -1.0)
+
+        # Prepare Overate (Pull out): half offset
+        if action.mode == TacticalMode.PREPARE_OVERTAKE:
+            if action.lateral_intention == LateralIntention.LEFT:
+                rho_n = max(rho_n, 0.8) # half car width bias
+            elif action.lateral_intention == LateralIntention.RIGHT:
+                rho_n = min(rho_n, -0.8)
 
         # Center modes: pull toward centerline
         if action.lateral_intention == LateralIntention.CENTER:
@@ -218,6 +219,12 @@ class TacticalToPlanner:
                         elif action.lateral_intention == LateralIntention.RIGHT:
                             # Pass on right: restrict left bound near opponent
                             n_left[i] = min(n_left[i], opp_n - margin)
+                    elif action.mode == TacticalMode.PREPARE_OVERTAKE:
+                        # Pull out (probe): keep the target lateral side open, only lightly restrict the opposite
+                        if action.lateral_intention == LateralIntention.LEFT:
+                            n_right[i] = max(n_right[i], opp_n + margin * 0.2)
+                        elif action.lateral_intention == LateralIntention.RIGHT:
+                            n_left[i] = min(n_left[i], opp_n - margin * 0.2)
                     elif action.mode == TacticalMode.FOLLOW:
                         # Stay behind: reduce both sides near opponent
                         if abs(delta_s_stage) < self.cfg.vehicle_length * 1.5:
@@ -226,10 +233,6 @@ class TacticalToPlanner:
                     elif action.mode == TacticalMode.DEFEND:
                         # Hold position on defend side
                         pass  # corridor unchanged, speed handles defense
-                    else:
-                        # Recover: conservative corridor, avoid opponent
-                        n_left[i] = min(n_left[i], opp_n - margin * 0.3)
-                        n_right[i] = max(n_right[i], opp_n + margin * 0.3)
 
         # Ensure corridor validity: left > right with minimum width
         min_corridor = veh_half * 2 + 0.5

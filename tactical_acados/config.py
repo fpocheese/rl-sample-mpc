@@ -95,8 +95,8 @@ class TacticalConfig:
     vehicle_length: float = 4.9
 
     # ---- Follow module ----
-    follow_gap_default: float = 12.0      # desired following gap [m]
-    follow_gap_min: float = 6.0           # minimum safe following gap [m]
+    follow_gap_default: float = 30.0      # desired following gap [m], enough to allow pulling out (抽头超车)
+    follow_gap_min: float = 15.0           # minimum safe following gap [m]
     follow_speed_match_gain: float = 0.8  # how quickly to match leader speed
     follow_virtual_wall_stiffness: float = 5.0  # penalty stiffness for virtual wall
     follow_decel_max: float = 8.0         # max deceleration for following [m/s^2]

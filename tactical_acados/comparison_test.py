@@ -140,18 +140,22 @@ class AlgorithmRunner:
             guidance = self.tactical_mapper.map(action, obs, self.cfg.N_steps_acados)
 
             # Follow module
-            if action.mode == TacticalMode.FOLLOW and self.opponents:
+            if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and self.opponents:
                 leader = self.follow_mod.find_nearest_car(self.ego_state['s'], opp_states)
                 if leader is not None:
                     fmods = self.follow_mod.get_follow_guidance_modifiers(self.ego_state, leader)
                     guidance.speed_scale = min(guidance.speed_scale, fmods['speed_scale'])
                     guidance.speed_cap = min(guidance.speed_cap, fmods['speed_cap'])
+                    if action.mode == TacticalMode.FOLLOW:
+                        guidance.terminal_n_target = fmods['terminal_n_target']
+                    guidance.safety_distance = max(guidance.safety_distance, fmods['safety_distance'])
+                    guidance.follow_target_id = fmods['follow_target_id']
 
         # Plan
         self.trajectory = self.planner.plan(self.ego_state, guidance)
 
         # Follow post-processing
-        if action is not None and action.mode == TacticalMode.FOLLOW and self.opponents:
+        if action is not None and action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and self.opponents:
             leader = self.follow_mod.find_nearest_car(self.ego_state['s'], opp_states)
             if leader is not None:
                 self.trajectory = self.follow_mod.post_process_trajectory(
