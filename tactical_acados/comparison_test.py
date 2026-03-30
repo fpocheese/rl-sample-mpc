@@ -277,8 +277,9 @@ def run_comparison(
         fig.suptitle(f"3-Way Comparison: {sc['name']}", fontsize=16)
 
         # Plot track on all panels
-        track_x = track_handler.track_center[:, 0]
-        track_y = track_handler.track_center[:, 1]
+        track_cartesian = track_handler.sn2cartesian(track_handler.s, np.zeros_like(track_handler.s))
+        track_x = track_cartesian[:, 0]
+        track_y = track_cartesian[:, 1]
         for i, ax in enumerate(axes):
             ax.plot(track_x, track_y, 'k-', linewidth=0.5, alpha=0.3)
             ax.set_title(algos[i].name)

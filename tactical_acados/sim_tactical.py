@@ -275,7 +275,7 @@ if __name__ == '__main__':
     # ============================================================
     # Configure simulation settings here (no CLI args needed)
     # ============================================================
-    SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
+    SCENARIO = 'scenario_b'     # 'scenario_a', 'scenario_b', 'scenario_c'
     VISUALIZE = True            # Set to False for headless mode
     MAX_STEPS = 999999          # Set very large for unlimited
     POLICY = 'heuristic'        # 'heuristic' or 'random'

@@ -217,9 +217,19 @@ class LocalRacinglinePlanner():
             safety_distance: float,
             prev_solution: dict,
             V_min: float = 5.0,
-            V_max: float = 1e3
+            V_max: float = 1e3,
+            optimization_horizon: float = None,
     ):
         V_max = min(self.vehicle_params['v_max'], V_max)
+
+        if optimization_horizon is not None and abs(optimization_horizon - self.optimization_horizon) > 1.0:
+            self.optimization_horizon = optimization_horizon
+            new_step = optimization_horizon / self.N_steps
+            try:
+                self.solver.set_new_time_steps(np.ones(self.N_steps) * new_step)
+            except AttributeError:
+                pass # fail silently if simulator doesn't support it
+
         raceline = self.__gen_raceline(
             s=s,
             V=max(V, V_min),
