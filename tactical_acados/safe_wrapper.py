@@ -82,12 +82,6 @@ class SafeTacticalWrapper:
         # Clip preference vector
         pref = action.preference.clip(cfg)
 
-        # Context-dependent further restrictions
-        # In high curvature: reduce aggressiveness, increase safety margin (unless purely solo racing)
-        if obs.upcoming_max_curvature > 0.02 and action.mode != TacticalMode.SOLO:  # tight corner
-            alpha = min(alpha, 0.7)
-            pref.rho_s = max(pref.rho_s, 1.0)
-
         # P2P validation
         p2p = action.p2p_trigger and obs.p2p_available
 
@@ -225,13 +219,6 @@ class SafeTacticalWrapper:
             obs: TacticalObservation,
     ) -> TacticalAction:
         """Final safety checks after all processing."""
-        # Check speed is not too aggressive for curvature
-        if obs.upcoming_max_curvature > 0.03:  # very tight
-            if action.aggressiveness > 0.6:
-                action.aggressiveness = 0.6
-            if action.preference.rho_v > 0.0:
-                action.preference.rho_v = 0.0
-
         # Check lateral bias is within track
         max_n = obs.w_left - self.cfg.vehicle_width / 2.0 - 0.3
         min_n = obs.w_right + self.cfg.vehicle_width / 2.0 + 0.3

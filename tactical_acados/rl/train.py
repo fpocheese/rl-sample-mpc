@@ -127,6 +127,7 @@ def train(
     from tactical_env import TacticalRacingEnv
     from hybrid_ppo import HybridPPOPolicy
     from theory_prior import TheoryPrior
+    from torch.utils.tensorboard import SummaryWriter
 
     # Create environment
     env = TacticalRacingEnv(
@@ -144,6 +145,7 @@ def train(
     # Training stats
     stats = defaultdict(list)
     best_mean_reward = -float('inf')
+    writer = SummaryWriter(log_dir=os.path.join(save_dir, 'tensorboard_logs'))
 
     print("=" * 70)
     print(f"Training Hybrid PPO on {scenario_name}")
@@ -225,6 +227,14 @@ def train(
         stats['episode_reward'].append(episode_reward)
         stats['episode_length'].append(episode_length)
 
+        writer.add_scalar('Train/Episode_Reward', episode_reward, episode)
+        writer.add_scalar('Train/Episode_Length', episode_length, episode)
+        if 'ppo_loss' in ppo_losses:
+            writer.add_scalar('Loss/PPO_Total', ppo_losses.get('ppo_loss', 0), episode)
+            writer.add_scalar('Loss/Theory_Prior', ppo_losses.get('theory_loss', 0), episode)
+            writer.add_scalar('Loss/Value', ppo_losses.get('value_loss', 0), episode)
+            writer.add_scalar('Loss/Policy', ppo_losses.get('policy_loss', 0), episode)
+
         if episode % 5 == 0:
             mean_reward = np.mean(stats['episode_reward'][-10:])
             print(f"[Ep {episode:4d}] reward={episode_reward:7.2f} "
@@ -253,6 +263,7 @@ def train(
     # Final save
     torch.save(policy.state_dict(), os.path.join(save_dir, 'final_policy.pt'))
     print(f"\nTraining complete. Best avg reward: {best_mean_reward:.2f}")
+    writer.close()
     return stats
 
 

@@ -243,7 +243,7 @@ def run_simulation(n_steps: int = 1000, visualize: bool = True):
         s_prev = state['s']
 
         if step % 10 == 0:
-            horizon_info = f"horizon={planner.current_horizon_m:.0f}m" if cfg.adaptive_horizon else ""
+            horizon_info = f"horizon={cfg.optimization_horizon_m:.0f}m"
             print(f"[Step {step:4d}] s={state['s']:8.2f} | "
                   f"n={state['n']:6.3f} | V={state['V']:6.2f} | "
                   f"plan_time={t_plan*1000:.1f}ms | "

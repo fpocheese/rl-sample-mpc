@@ -89,6 +89,6 @@ python tactical_acados/comparison_test.py
 1. `safety_distance` (安全边界距离): 从默认的膨胀系数放大，比如强行变宽来形成超车走廊。
 2. `terminal_n_target` (侧向引导): 如果AI决定“超车_左”，这里会传一个左移的目标值，通过二次函数的偏置（Bias）给ACADOS代价函数施压，骗优化器规划出左侧变道。
 3. `speed_scale` / `speed_cap` (速度意图): 与 `follow_module.py` 配合，算出当前能允许的最大上限送进求解器，或者让车逼近理论最高速度前瞻。
-4. `optimization_horizon_m` (自适应前瞻视距): 位于 `acados_planner.py` 的 `_compute_adaptive_horizon()` 中，根据你目前的动态车速自动算出4秒钟之后的路程长短并直接送进卡萨迪模型替换定值300m（安全下限150m）。
+4. `optimization_horizon_m` (预设前瞻视距): 现在已固定在稳定的 300 米以防止求解器断层。
 
 这套机制极其优雅且成熟：它**100%保留了你之前论文里建立的所有运动学、打滑避免和最优底盘控制（完美平滑不翻车）**，相当于给原来的局部路径规划器安上了一个懂得看其他对手、选择时机和战术博弈的“上层AI领航员”。

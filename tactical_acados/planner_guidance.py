@@ -106,11 +106,6 @@ class TacticalToPlanner:
         if action.mode == TacticalMode.SOLO:
             return base_cap
             
-        # High curvature: additional speed limit
-        if obs.upcoming_max_curvature > 0.02:
-            curv_cap = 1.0 / (obs.upcoming_max_curvature * 3.0)
-            base_cap = min(base_cap, curv_cap)
-
         return base_cap
 
     def _compute_safety_distance(self, action: TacticalAction,
@@ -222,9 +217,14 @@ class TacticalToPlanner:
                 elif delta_s_stage < -track_len / 2:
                     delta_s_stage += track_len
 
-                # Only carve corridor if opponent is nearby longitudinally
-                if abs(delta_s_stage) < self.cfg.vehicle_length * 3:
-                    margin = self.cfg.corridor_safety_margin + veh_half
+                # Smoothly carve corridor to avoid infinite-curvature artificial corners (C0 discontinuity)
+                dist = abs(delta_s_stage)
+                inflated_length = self.cfg.vehicle_length * 4.0  # Smooth ramp length
+
+                if dist < inflated_length:
+                    # C1-continuous cos^2 ramp: 1.0 at dist=0, 0.0 at dist=inflated_length
+                    ramp = np.cos((dist / inflated_length) * (np.pi / 2.0)) ** 2
+                    margin = (self.cfg.corridor_safety_margin + veh_half) * ramp
                     opp_n = opp_n_pred[i]
 
                     if action.mode == TacticalMode.OVERTAKE:
@@ -235,16 +235,19 @@ class TacticalToPlanner:
                             # Pass on right: restrict left bound near opponent
                             n_left[i] = min(n_left[i], opp_n - margin)
                     elif action.mode == TacticalMode.PREPARE_OVERTAKE:
-                        # Pull out (probe): keep the target lateral side open, only lightly restrict the opposite
+                        # Pull out (probe): keep the target lateral side open, lightly restrict the opposite
                         if action.lateral_intention == LateralIntention.LEFT:
                             n_right[i] = max(n_right[i], opp_n + margin * 0.2)
                         elif action.lateral_intention == LateralIntention.RIGHT:
                             n_left[i] = min(n_left[i], opp_n - margin * 0.2)
                     elif action.mode == TacticalMode.FOLLOW:
-                        # Stay behind: reduce both sides near opponent
-                        if abs(delta_s_stage) < self.cfg.vehicle_length * 1.5:
-                            n_left[i] = min(n_left[i], opp_n + margin * 0.5)
-                            n_right[i] = max(n_right[i], opp_n - margin * 0.5)
+                        # Stay behind: reduce both sides (funnel shape)
+                        tight_dist = self.cfg.vehicle_length * 2.0
+                        if dist < tight_dist:
+                            tight_ramp = np.cos((dist / tight_dist) * (np.pi / 2.0)) ** 2
+                            tight_margin = (self.cfg.corridor_safety_margin + veh_half) * tight_ramp
+                            n_left[i] = min(n_left[i], opp_n + tight_margin * 0.5)
+                            n_right[i] = max(n_right[i], opp_n - tight_margin * 0.5)
                     elif action.mode == TacticalMode.DEFEND:
                         # Hold position on defend side
                         pass  # corridor unchanged, speed handles defense

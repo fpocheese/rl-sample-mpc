@@ -49,7 +49,6 @@ class AcadosTacticalPlanner:
         self._prev_solution: Optional[dict] = None
         self._prev_trajectory: Optional[dict] = None
         self._consecutive_failures: int = 0
-        self._current_horizon_m: float = cfg.optimization_horizon_m
 
     def plan(
             self,
@@ -70,10 +69,6 @@ class AcadosTacticalPlanner:
         """
         if guidance is None:
             guidance = get_default_guidance(self.cfg)
-
-        # Compute adaptive horizon
-        if self.cfg.adaptive_horizon:
-            self._current_horizon_m = self._compute_adaptive_horizon(state['s'])
 
         # Compute effective V_max
         base_v_max = self.vehicle_params.get('v_max', 90.0)
@@ -110,7 +105,8 @@ class AcadosTacticalPlanner:
                 safety_distance=guidance.safety_distance,
                 prev_solution=self._prev_solution,
                 V_max=v_max,
-                optimization_horizon=self._current_horizon_m,
+                n_left_override=guidance.n_left_override,
+                n_right_override=guidance.n_right_override,
             )
 
             # Store for warm-start
@@ -129,7 +125,7 @@ class AcadosTacticalPlanner:
             return trajectory
 
         except Exception as e:
-            print(f"[AcadosTacticalPlanner] Planner failed: {e}")
+            # print(f"[AcadosTacticalPlanner] Planner failed: {e}")
             return None
 
     def _resample_to_time_domain(
@@ -260,148 +256,84 @@ class AcadosTacticalPlanner:
 
     def _generate_fallback(self, state: dict) -> dict:
         """
-        Generate a safe fallback trajectory.
-        Uses the global raceline or a coast-down from current state.
+        Generate a safe, kinematically contiguous fallback trajectory:
+        1. Follows the remaining valid time-slices of the last successful plan.
+        2. Extrapolates coasting kinematics for any future time beyond the old plan's horizon.
         """
         print(f"[AcadosTacticalPlanner] Using fallback "
               f"(consecutive failures: {self._consecutive_failures})")
 
-        # Try using previous trajectory shifted forward
-        if self._prev_trajectory is not None:
-            shifted = self._shift_previous_trajectory(state)
-            if shifted is not None:
-                return shifted
-
-        # Fall back to global raceline
-        return self._raceline_fallback(state)
-
-    def _shift_previous_trajectory(self, state: dict) -> Optional[dict]:
-        """Shift the previous trajectory forward by one dt step."""
-        prev = self._prev_trajectory
-        if prev is None:
-            return None
-
-        dt = self.cfg.dt
-        t_prev = prev['t']
-        N = self.cfg.n_trajectory_points
-        horizon = self.cfg.planning_horizon
-
-        # Shift time
-        t_new = np.linspace(0.0, horizon, N)
-
-        # Interpolate from shifted previous trajectory
-        try:
-            trajectory = {}
-            for key in ['s', 'V', 'n', 'chi', 'ax', 'ay']:
-                trajectory[key] = np.interp(
-                    t_new + dt, t_prev, prev[key],
-                )
-            trajectory['t'] = t_new
-
-            # Wrap s
-            trajectory['s'] = trajectory['s'] % self.track_handler.s[-1]
-
-            # Recompute Cartesian
-            xyz = self.track_handler.sn2cartesian(trajectory['s'], trajectory['n'])
-            if xyz.ndim == 1:
-                xyz = xyz.reshape(1, -1)
-            trajectory['x'] = xyz[:, 0]
-            trajectory['y'] = xyz[:, 1]
-            trajectory['z'] = xyz[:, 2]
-
-            # Recompute temporal derivatives
-            Omega_z = np.interp(trajectory['s'], self.track_handler.s,
-                                self.track_handler.Omega_z,
-                                period=self.track_handler.s[-1])
-            trajectory['s_dot'] = trajectory['V'] * np.cos(trajectory['chi']) / \
-                                  (1.0 - trajectory['n'] * Omega_z)
-            trajectory['n_dot'] = trajectory['V'] * np.sin(trajectory['chi'])
-
-            dOmega_z = np.interp(trajectory['s'], self.track_handler.s,
-                                 self.track_handler.dOmega_z,
-                                 period=self.track_handler.s[-1])
-            chi_dot = trajectory['ay'] / np.maximum(trajectory['V'], 1.0) - \
-                      Omega_z * trajectory['s_dot']
-            trajectory['s_ddot'] = (
-                (trajectory['ax'] * np.cos(trajectory['chi']) -
-                 trajectory['V'] * np.sin(trajectory['chi']) * chi_dot) /
-                (1.0 - trajectory['n'] * Omega_z) -
-                (trajectory['V'] * np.cos(trajectory['chi']) *
-                 (-trajectory['n_dot'] * Omega_z -
-                  trajectory['n'] * dOmega_z * trajectory['s_dot'])) /
-                (1.0 - trajectory['n'] * Omega_z) ** 2
-            )
-            trajectory['n_ddot'] = (
-                trajectory['V'] * np.cos(trajectory['chi']) * chi_dot +
-                trajectory['ax'] * np.sin(trajectory['chi'])
-            )
-
-            return trajectory
-        except Exception:
-            return None
-
-    def _raceline_fallback(self, state: dict) -> dict:
-        """Use global raceline as fallback with speed reduction."""
         N = self.cfg.n_trajectory_points
         horizon = self.cfg.planning_horizon
         t_out = np.linspace(0.0, horizon, N)
+        dt = self.cfg.dt
 
-        # Get raceline starting from current s
-        raceline = self.global_planner.calc_raceline(s=state['s'])
+        # Shift amount based on consecutive failures
+        shift_t = self._consecutive_failures * dt
+        trajectory = {'t': t_out}
 
-        # Interpolate raceline to time grid
-        t_rl = raceline['t']
-        s_rl = np.unwrap(raceline['s'],
-                         discont=self.track_handler.s[-1] / 2.0,
-                         period=self.track_handler.s[-1])
+        # Coasting fallback parameters
+        V_min = self.cfg.V_min
 
-        s_out = np.interp(t_out, t_rl, s_rl)
-        # Reduce speed for safety
-        speed_factor = 0.7
-        V_out = np.interp(t_out, t_rl, raceline['V']) * speed_factor
-        V_out = np.maximum(V_out, self.cfg.V_min)
-        n_out = np.interp(t_out, t_rl, raceline['n'])
-        chi_out = np.interp(t_out, t_rl, raceline['chi'])
-        ax_out = np.interp(t_out, t_rl, raceline['ax']) * speed_factor
-        ay_out = np.interp(t_out, t_rl, raceline['ay']) * speed_factor
+        # If we have a successful previous trajectory, use it as the base
+        if self._prev_trajectory is not None:
+            prev = self._prev_trajectory
+            t_prev = prev['t']
+            eval_t = t_out + shift_t
 
-        s_out_wrapped = s_out % self.track_handler.s[-1]
-        xyz = self.track_handler.sn2cartesian(s_out_wrapped, n_out)
+            valid_mask = eval_t <= t_prev[-1]
+            invalid_mask = ~valid_mask
+
+            for key in ['s', 'V', 'n', 'chi', 'ax', 'ay', 's_dot', 'n_dot', 's_ddot', 'n_ddot']:
+                trajectory[key] = np.zeros(N)
+                if np.any(valid_mask):
+                    trajectory[key][valid_mask] = np.interp(
+                        eval_t[valid_mask], t_prev, prev[key]
+                    )
+
+            if np.any(invalid_mask):
+                if np.any(valid_mask):
+                    last_idx = np.where(valid_mask)[0][-1]
+                    s0 = trajectory['s'][last_idx]
+                    V0 = max(trajectory['V'][last_idx], V_min)
+                    n0 = trajectory['n'][last_idx]
+                    chi0 = trajectory['chi'][last_idx]
+                    t_start = t_out[last_idx]
+                else:
+                    s0 = state['s']
+                    V0 = max(state['V'], V_min)
+                    n0 = state['n']
+                    chi0 = state['chi']
+                    t_start = 0.0
+
+                dt_extrap = t_out[invalid_mask] - t_start
+                V_extrap = V0 * np.exp(-dt_extrap / 5.0)
+                trajectory['V'][invalid_mask] = V_extrap
+                trajectory['s'][invalid_mask] = s0 + 5.0 * V0 * (1.0 - np.exp(-dt_extrap / 5.0))
+                trajectory['n'][invalid_mask] = n0
+                trajectory['chi'][invalid_mask] = chi0 * np.exp(-dt_extrap / 2.0)
+                
+        else:
+            # Immediate cold fallback (no previous history)
+            V0 = max(state['V'], V_min) * (0.95 ** (self._consecutive_failures / 5.0))
+            trajectory['V'] = np.ones(N) * V0
+            trajectory['s'] = state['s'] + V0 * t_out
+            trajectory['n'] = np.ones(N) * state['n']
+            trajectory['chi'] = state['chi'] * np.exp(-t_out / 1.5)
+            for key in ['ax', 'ay', 's_ddot', 'n_ddot']:
+                trajectory[key] = np.zeros(N)
+            trajectory['s_dot'] = trajectory['V'] * np.cos(trajectory['chi'])
+            trajectory['n_dot'] = trajectory['V'] * np.sin(trajectory['chi'])
+
+        # Finalize geometry
+        trajectory['s'] = trajectory['s'] % self.track_handler.s[-1]
+        xyz = self.track_handler.sn2cartesian(trajectory['s'], trajectory['n'])
         if xyz.ndim == 1:
             xyz = xyz.reshape(1, -1)
+        trajectory['x'] = xyz[:, 0]
+        trajectory['y'] = xyz[:, 1]
+        trajectory['z'] = xyz[:, 2]
 
-        Omega_z = np.interp(s_out_wrapped, self.track_handler.s,
-                            self.track_handler.Omega_z,
-                            period=self.track_handler.s[-1])
-        s_dot = V_out * np.cos(chi_out) / (1.0 - n_out * Omega_z)
-        n_dot = V_out * np.sin(chi_out)
-
-        dOmega_z = np.interp(s_out_wrapped, self.track_handler.s,
-                             self.track_handler.dOmega_z,
-                             period=self.track_handler.s[-1])
-        chi_dot = ay_out / np.maximum(V_out, 1.0) - Omega_z * s_dot
-        s_ddot = (ax_out * np.cos(chi_out) - V_out * np.sin(chi_out) * chi_dot) / \
-                 (1.0 - n_out * Omega_z) - \
-                 (V_out * np.cos(chi_out) * (-n_dot * Omega_z - n_out * dOmega_z * s_dot)) / \
-                 (1.0 - n_out * Omega_z) ** 2
-        n_ddot = V_out * np.cos(chi_out) * chi_dot + ax_out * np.sin(chi_out)
-
-        trajectory = {
-            't': t_out,
-            's': s_out_wrapped,
-            'n': n_out,
-            'V': V_out,
-            'chi': chi_out,
-            'ax': ax_out,
-            'ay': ay_out,
-            'x': xyz[:, 0],
-            'y': xyz[:, 1],
-            'z': xyz[:, 2],
-            's_dot': s_dot,
-            'n_dot': n_dot,
-            's_ddot': s_ddot,
-            'n_ddot': n_ddot,
-        }
         return trajectory
 
     @property
@@ -411,54 +343,12 @@ class AcadosTacticalPlanner:
 
     @property
     def current_horizon_m(self) -> float:
-        """Current adaptive optimization horizon."""
-        return self._current_horizon_m
+        """Current optimization horizon."""
+        return self.cfg.optimization_horizon_m
 
-    def _compute_adaptive_horizon(self, s_current: float) -> float:
-        """
-        Compute adaptive optimization horizon based on raceline speed profile.
-        
-        Uses T_lookahead (default 4s) and integrates along the raceline's
-        speed profile to determine how far ahead to plan.
-        Bounds: [min_horizon_m, max_horizon_m]
-        """
-        cfg = self.cfg
-        track_s = self.track_handler.s
-        track_len = track_s[-1]
-
-        # Get raceline speed profile starting from current s
-        raceline = self.global_planner.calc_raceline(s=s_current)
-        V_rl = raceline['V']
-        s_rl = raceline['s']
-        t_rl = raceline['t']
-
-        if t_rl is None or len(t_rl) < 2:
-            return cfg.optimization_horizon_m
-
-        # Find the s-distance covered in T_lookahead seconds
-        t_rl = np.asarray(t_rl)
-        s_rl_unwrap = np.unwrap(
-            np.asarray(s_rl),
-            discont=track_len / 2.0,
-            period=track_len
-        )
-
-        # Interpolate: what s-distance is covered by t = T_lookahead?
-        if t_rl[-1] >= cfg.T_lookahead:
-            horizon_m = float(np.interp(cfg.T_lookahead, t_rl, s_rl_unwrap) - s_rl_unwrap[0])
-        else:
-            # Extrapolate linearly if raceline doesn't cover full T_lookahead
-            avg_speed = (s_rl_unwrap[-1] - s_rl_unwrap[0]) / max(t_rl[-1], 0.01)
-            horizon_m = avg_speed * cfg.T_lookahead
-
-        # Clamp to bounds
-        horizon_m = float(np.clip(horizon_m, cfg.min_horizon_m, cfg.max_horizon_m))
-
-        return horizon_m
 
     def reset(self):
         """Reset planner state for new episode."""
         self._prev_solution = None
         self._prev_trajectory = None
         self._consecutive_failures = 0
-        self._current_horizon_m = self.cfg.optimization_horizon_m

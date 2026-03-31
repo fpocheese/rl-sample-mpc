@@ -41,9 +41,6 @@ class HeuristicTacticalPolicy:
 
         if not has_nearby:
             action = self._race_line_action(obs)
-        # High curvature → conservative follow (only if battling)
-        elif obs.upcoming_max_curvature > 0.025:
-            action = self._conservative_action(obs)
         else:
             # Find most relevant opponent
             ahead = [o for o in obs.opponents if o.delta_s < 0]
@@ -73,19 +70,6 @@ class HeuristicTacticalPolicy:
             p2p_trigger=False,
         )
 
-    def _conservative_action(self, obs: TacticalObservation) -> TacticalAction:
-        """High curvature → conservative following."""
-        return TacticalAction(
-            discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
-            aggressiveness=0.3,
-            preference=PreferenceVector(
-                rho_v=-0.1,
-                rho_n=0.0,
-                rho_s=1.3,
-                rho_w=1.5,
-            ),
-            p2p_trigger=False,
-        )
 
     def _overtake_decision(self, obs: TacticalObservation,
                             target: 'OpponentState') -> TacticalAction:
@@ -129,7 +113,7 @@ class HeuristicTacticalPolicy:
             )
 
         # Aggressiveness based on speed difference and gap
-        alpha = np.clip(0.5 + (obs.ego_V - target.V) / 20.0, 0.6, 0.95)
+        alpha = np.clip(0.85 + (obs.ego_V - target.V) / 40.0, 0.85, 1.0)
 
         # Consider P2P for close overtakes
         use_p2p = (gap < 15.0 and obs.p2p_available and

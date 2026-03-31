@@ -147,6 +147,7 @@ class LocalRacinglinePlanner():
             self.ocp.constraints.Jsh = np.array(
                 [[1.0]]
             )
+            self.ocp.constraints.idxsh = np.array([0])
             # weights for slack variables (n and rho)
             self.ocp.cost.Zl = np.array([w_slack_n, w_slack_gg])
             self.ocp.cost.zl = self.ocp.cost.Zl / 10.0
@@ -165,6 +166,7 @@ class LocalRacinglinePlanner():
                 100.0,
             ])
             self.ocp.constraints.Jsh = np.eye(3)
+            self.ocp.constraints.idxsh = np.array([0, 1, 2])
 
             # weights for slack variables (n, ax, ay, axy)
             self.ocp.cost.Zl = np.array([w_slack_n, w_slack_gg, w_slack_gg, w_slack_gg])
@@ -218,17 +220,10 @@ class LocalRacinglinePlanner():
             prev_solution: dict,
             V_min: float = 5.0,
             V_max: float = 1e3,
-            optimization_horizon: float = None,
+            n_left_override: np.ndarray = None,
+            n_right_override: np.ndarray = None,
     ):
         V_max = min(self.vehicle_params['v_max'], V_max)
-
-        if optimization_horizon is not None and abs(optimization_horizon - self.optimization_horizon) > 1.0:
-            self.optimization_horizon = optimization_horizon
-            new_step = optimization_horizon / self.N_steps
-            try:
-                self.solver.set_new_time_steps(np.ones(self.N_steps) * new_step)
-            except AttributeError:
-                pass # fail silently if simulator doesn't support it
 
         raceline = self.__gen_raceline(
             s=s,
@@ -240,6 +235,8 @@ class LocalRacinglinePlanner():
             prev_solution=prev_solution if V > V_min else None,
             safety_distance=safety_distance,
             V_max=V_max,
+            n_left_override=n_left_override,
+            n_right_override=n_right_override,
         )
 
         # calculate temporal derivatives
@@ -278,6 +275,8 @@ class LocalRacinglinePlanner():
             prev_solution: dict,
             safety_distance: float,
             V_max: float,
+            n_left_override: np.ndarray = None,
+            n_right_override: np.ndarray = None,
     ):
         N = self.ocp.dims.N
         horizon = self.ocp.solver_options.tf
@@ -334,6 +333,18 @@ class LocalRacinglinePlanner():
             self.track_handler.w_tr_right,
             period=self.track_handler.s[-1]
         )
+        
+        if n_left_override is not None:
+            w_tr_left = np.interp(
+                s_array,
+                np.linspace(s, s + horizon, len(n_left_override)),
+                n_left_override)
+        if n_right_override is not None:
+            w_tr_right = np.interp(
+                s_array,
+                np.linspace(s, s + horizon, len(n_right_override)),
+                n_right_override)
+
         veh_width = self.vehicle_params['total_width']
 
         V_exceed = max(0.0, V - V_max)
@@ -392,6 +403,7 @@ class LocalRacinglinePlanner():
         # solve OCP
         status = self.solver.solve()
         if status not in [0, 2, 5]:  # 0=SUCCESS, 2=MAX_ITER
+            print(f"\n[DEBUG] ACADOS FAILED (status={status}) at s={s:.1f} V={V:.1f} n={n:.1f} chi={chi:.2f} horizon={horizon:.1f}")
             raise RuntimeError(f"ACADOS solver failed with status {status}")
 
         # extract solution

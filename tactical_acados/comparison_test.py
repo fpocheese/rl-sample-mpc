@@ -46,13 +46,16 @@ from sim_acados_only import load_setup, create_initial_state, perfect_tracking_u
 class AlgorithmRunner:
     """Run one algorithm variant and collect logs."""
 
-    def __init__(self, name, scenario, cfg, params, track_handler,
-                 gg_handler, local_planner, global_planner, policy_fn):
+    def __init__(self, name: str, scenario: dict, cfg: TacticalConfig,
+                 params: dict, track_handler, gg_handler, local_planner, global_planner,
+                 policy_fn: callable = None, is_a2rl_carver: bool = False):
         self.name = name
         self.scenario = scenario
         self.cfg = cfg
         self.params = params
         self.track_handler = track_handler
+        self.policy_fn = policy_fn
+        self.is_a2rl_carver = is_a2rl_carver
 
         self.planner = AcadosTacticalPlanner(
             local_planner=local_planner,
@@ -65,7 +68,6 @@ class AlgorithmRunner:
         self.tactical_mapper = TacticalToPlanner(track_handler, cfg)
         self.follow_mod = FollowModule(track_handler, cfg)
         self.p2p = PushToPass(cfg)
-        self.policy_fn = policy_fn  # callable(obs) -> TacticalAction or None
 
         # State
         ego_cfg = scenario['ego']
@@ -102,6 +104,12 @@ class AlgorithmRunner:
             'dt': cfg.assumed_calc_time,
         }
 
+        if self.is_a2rl_carver:
+            from a2rl_obstacle_carver import A2RLObstacleCarver
+            self.a2rl_carver = A2RLObstacleCarver(track_handler, cfg)
+        else:
+            self.a2rl_carver = None
+
     def step(self):
         """Execute one simulation step. Returns (ego_state, trajectory, action_name)."""
         # Build opp states
@@ -125,42 +133,58 @@ class AlgorithmRunner:
         )
 
         # Policy
-        action = self.policy_fn(obs)
-        if action is None:
-            # No-decision mode: use default guidance
-            guidance = PlannerGuidance(
-                safety_distance=self.cfg.safety_distance_default,
-                speed_cap=self.params['vehicle_params'].get('v_max', 90.0),
+        if self.is_a2rl_carver:
+            action = None
+            tactic_name = "A2RL_RAW"
+            alpha_val = 1.0
+            ds = self.cfg.optimization_horizon_m / self.cfg.N_steps_acados
+            guidance = self.a2rl_carver.construct_guidance(
+                self.ego_state,
+                opp_states,
+                self.cfg.N_steps_acados,
+                ds,
+                prev_trajectory=self.trajectory
             )
-            tactic_name = "NO_DECISION"
-            alpha_val = 0.5
         else:
-            tactic_name = action.discrete_tactic.name
-            alpha_val = action.aggressiveness
-            guidance = self.tactical_mapper.map(action, obs, self.cfg.N_steps_acados)
+            action = self.policy_fn(obs)
+            if action is None:
+                # No-decision mode: use default guidance
+                guidance = PlannerGuidance(
+                    safety_distance=self.cfg.safety_distance_default,
+                    speed_cap=self.params['vehicle_params'].get('v_max', 90.0),
+                )
+                tactic_name = "NO_DECISION"
+                alpha_val = 0.5
+            else:
+                tactic_name = action.discrete_tactic.name
+                alpha_val = action.aggressiveness
+                guidance = self.tactical_mapper.map(action, obs, self.cfg.N_steps_acados)
 
-            # Follow module
-            if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and self.opponents:
-                leader = self.follow_mod.find_nearest_car(self.ego_state['s'], opp_states)
-                if leader is not None:
-                    fmods = self.follow_mod.get_follow_guidance_modifiers(self.ego_state, leader)
-                    guidance.speed_scale = min(guidance.speed_scale, fmods['speed_scale'])
-                    guidance.speed_cap = min(guidance.speed_cap, fmods['speed_cap'])
-                    if action.mode == TacticalMode.FOLLOW:
-                        guidance.terminal_n_target = fmods['terminal_n_target']
-                    guidance.safety_distance = max(guidance.safety_distance, fmods['safety_distance'])
-                    guidance.follow_target_id = fmods['follow_target_id']
+                # Follow module
+                from tactical_action import TacticalMode
+                if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and self.opponents:
+                    leader = self.follow_mod.find_nearest_car(self.ego_state['s'], opp_states)
+                    if leader is not None:
+                        fmods = self.follow_mod.get_follow_guidance_modifiers(self.ego_state, leader)
+                        guidance.speed_scale = min(guidance.speed_scale, fmods['speed_scale'])
+                        guidance.speed_cap = min(guidance.speed_cap, fmods['speed_cap'])
+                        if action.mode == TacticalMode.FOLLOW:
+                            guidance.terminal_n_target = fmods['terminal_n_target']
+                        guidance.safety_distance = max(guidance.safety_distance, fmods['safety_distance'])
+                        guidance.follow_target_id = fmods['follow_target_id']
 
         # Plan
         self.trajectory = self.planner.plan(self.ego_state, guidance)
 
         # Follow post-processing
-        if action is not None and action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and self.opponents:
-            leader = self.follow_mod.find_nearest_car(self.ego_state['s'], opp_states)
-            if leader is not None:
-                self.trajectory = self.follow_mod.post_process_trajectory(
-                    self.trajectory, self.ego_state, leader
-                )
+        if action is not None:
+            from tactical_action import TacticalMode
+            if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and self.opponents:
+                leader = self.follow_mod.find_nearest_car(self.ego_state['s'], opp_states)
+                if leader is not None:
+                    self.trajectory = self.follow_mod.post_process_trajectory(
+                        self.trajectory, self.ego_state, leader
+                    )
 
         # Move opponents
         for opp in self.opponents:
@@ -258,19 +282,21 @@ def run_comparison(
     else:
         rl_policy_fn = lambda obs: rl_policy.act(obs)
 
-    # 2. No-decision: returns None (pure ACADOS raceline)
-    no_decision_fn = lambda obs: None
+    # 2. RAW A2RL C++ Baseline (treats opponents purely as constraints, dynamic programming bound carving)
+    # Replaces the ReactiveAcadosPolicy
+    # Passed directly as flag to AlgorithmRunner
 
     # 3. Naive game-theory: uses heuristic policy
     naive_policy = HeuristicTacticalPolicy(cfg)
     naive_fn = lambda obs: naive_policy.act(obs)
 
-    # --- Create runners ---
+    # Instantiate algorithms
+    print("Initializing solvers...")
     algos = [
         AlgorithmRunner("Ours (RL)", scenario, cfg, params, track_handler,
                         gg_handler, local_planner, global_planner, rl_policy_fn),
-        AlgorithmRunner("No Decision", scenario, cfg, params, track_handler,
-                        gg_handler, local_planner, global_planner, no_decision_fn),
+        AlgorithmRunner("A2RL (RAW OCP)", scenario, cfg, params, track_handler,
+                        gg_handler, local_planner, global_planner, policy_fn=None, is_a2rl_carver=True),
         AlgorithmRunner("Naive GT", scenario, cfg, params, track_handler,
                         gg_handler, local_planner, global_planner, naive_fn),
     ]
@@ -281,11 +307,17 @@ def run_comparison(
         fig.suptitle(f"3-Way Comparison: {sc['name']}", fontsize=16)
 
         # Plot track on all panels
-        track_cartesian = track_handler.sn2cartesian(track_handler.s, np.zeros_like(track_handler.s))
-        track_x = track_cartesian[:, 0]
-        track_y = track_cartesian[:, 1]
+        bounds_left = track_handler.sn2cartesian(track_handler.s, track_handler.w_tr_left)
+        bounds_right = track_handler.sn2cartesian(track_handler.s, track_handler.w_tr_right)
+        track_x = track_handler.sn2cartesian(track_handler.s, np.zeros_like(track_handler.s))[:, 0]
+        track_y = track_handler.sn2cartesian(track_handler.s, np.zeros_like(track_handler.s))[:, 1]
+        track_lx, track_ly = bounds_left[:, 0], bounds_left[:, 1]
+        track_rx, track_ry = bounds_right[:, 0], bounds_right[:, 1]
+
         for i, ax in enumerate(axes):
-            ax.plot(track_x, track_y, 'k-', linewidth=0.5, alpha=0.3)
+            ax.plot(track_x, track_y, 'k--', linewidth=0.5, alpha=0.3)
+            ax.plot(track_lx, track_ly, 'k-', linewidth=1.5, alpha=0.8)
+            ax.plot(track_rx, track_ry, 'k-', linewidth=1.5, alpha=0.8)
             ax.set_title(algos[i].name)
             ax.set_aspect('equal')
             ax.grid(True, alpha=0.3)
@@ -316,14 +348,29 @@ def run_comparison(
 
         # Visualization update
         if visualize and step % 5 == 0:
+            import matplotlib.patches as patches
+            veh = params['vehicle_params']
+
             for i, (algo, (state, traj, tactic)) in enumerate(zip(algos, results)):
                 ax = axes[i]
                 ax.cla()
-                ax.plot(track_x, track_y, 'k-', linewidth=0.5, alpha=0.3)
+                ax.plot(track_x, track_y, 'k--', linewidth=0.5, alpha=0.3)
+                ax.plot(track_lx, track_ly, 'k-', linewidth=1.5, alpha=0.8)
+                ax.plot(track_rx, track_ry, 'k-', linewidth=1.5, alpha=0.8)
                 ax.set_title(f"{algo.name}\n{tactic} | V={state['V']:.1f}")
 
+                def draw_rect(ax_obj, x, y, chi, s, color, alpha=0.8):
+                    heading = track_handler.calc_2d_heading_from_chi(chi, s)
+                    rect = patches.Rectangle(
+                        (x - veh['total_length']/2 * np.cos(heading) + veh['total_width']/2 * np.sin(heading),
+                         y - veh['total_length']/2 * np.sin(heading) - veh['total_width']/2 * np.cos(heading)),
+                        veh['total_length'], veh['total_width'],
+                        angle=np.rad2deg(heading), color=color, alpha=alpha
+                    )
+                    ax_obj.add_patch(rect)
+
                 # Ego
-                ax.plot(state['x'], state['y'], 'ro', markersize=8)
+                draw_rect(ax, state['x'], state['y'], state['chi'], state['s'], 'dodgerblue')
 
                 # Trajectory
                 if traj is not None:
@@ -331,11 +378,11 @@ def run_comparison(
 
                 # Opponents
                 for opp in algo.opponents:
-                    ax.plot(opp.x, opp.y, 'gs', markersize=6)
+                    draw_rect(ax, opp.x, opp.y, getattr(opp, 'chi', 0.0), opp.s, 'crimson', alpha=0.7)
 
                 # Zoom around ego
-                ax.set_xlim(state['x'] - 100, state['x'] + 100)
-                ax.set_ylim(state['y'] - 100, state['y'] + 100)
+                ax.set_xlim(state['x'] - 60, state['x'] + 60)
+                ax.set_ylim(state['y'] - 60, state['y'] + 60)
                 ax.set_aspect('equal')
                 ax.grid(True, alpha=0.3)
 
@@ -422,7 +469,7 @@ if __name__ == '__main__':
     SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
     VISUALIZE = True            # Side-by-side 3-panel visualization
     MAX_STEPS = 999999          # Set very large for unlimited
-    RL_POLICY_PATH = None       # Path to trained RL policy .pt file, or None for heuristic
+    RL_POLICY_PATH = 'tactical_acados/checkpoints/best_policy.pt'       # Path to trained RL policy .pt file, or None for heuristic
     # ============================================================
 
     run_comparison(

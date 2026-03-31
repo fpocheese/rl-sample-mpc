@@ -139,3 +139,9 @@ logs/*
 c_generated_code
 acados_ocp.json
 acados_ocp_nlp.json
+
+# Tactical RL training artifacts
+tactical_acados/checkpoints/
+tactical_acados/**/tensorboard_logs/
+tactical_acados/**/runs/
+tactical_acados/**/wandb/

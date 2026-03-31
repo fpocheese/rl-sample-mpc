@@ -22,11 +22,7 @@ class TacticalConfig:
     gg_margin: float = 0.1               # GG diagram margin
     safety_distance_default: float = 0.5  # meters
 
-    # ---- Adaptive horizon (time-based lookahead) ----
-    adaptive_horizon: bool = True         # enable adaptive horizon
-    T_lookahead: float = 4.0             # seconds of lookahead for adaptive horizon
-    min_horizon_m: float = 150.0         # minimum optimization horizon [m]
-    max_horizon_m: float = 400.0         # maximum optimization horizon [m]
+
 
     # ---- Simulation ----
     assumed_calc_time: float = 0.125      # seconds per sim step (matches dt)
