@@ -100,6 +100,10 @@ class AcadosTacticalPlanner:
             self._consecutive_failures += 1
             self.debug_log['_consecutive_failures'] = self._consecutive_failures
             self.debug_log['used_fallback'] = True
+            # After 2 consecutive failures, discard the corrupted warm-start solution.
+            # A stale bad solution causes solver divergence to cascade (snowball effect).
+            if self._consecutive_failures >= 2:
+                self._prev_solution = None
             return self._generate_fallback(state)
 
     def _try_plan(
