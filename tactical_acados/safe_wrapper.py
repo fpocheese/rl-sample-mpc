@@ -106,6 +106,7 @@ class SafeTacticalWrapper:
         4. Final validation
         """
         safe_set = self.get_safe_discrete_set(obs)
+        self.last_safe_set = safe_set
 
         # Step 1: Validate discrete action
         if action.discrete_tactic not in safe_set:
@@ -146,6 +147,10 @@ class SafeTacticalWrapper:
             )
             if not has_opp_ahead:
                 return False
+
+            # Separate thresholds: PREPARE is looser than OVERTAKE
+            is_prepare = mode == TacticalMode.PREPARE_OVERTAKE
+            req_space = 1.8 if is_prepare else 2.5
 
             # Check if corridor exists on the desired side
             if lateral == LateralIntention.LEFT:

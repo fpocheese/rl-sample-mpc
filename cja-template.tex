@@ -1,0 +1,2591 @@
+% !TeX encoding = UTF-8
+% !TeX program = pdflatex
+% !TeX spellcheck = en_US
+
+%
+
+% \documentclass{cja}
+
+% \documentclass[preprint,12pt]{elsarticle}
+\documentclass[final ,3p, times]{elsarticle}
+ 
+% Use the option doubleblind to hide author name, affiliation, email address etc.
+% when submitting the manuscript for double blind refereeing purpose.
+% \documentclass[doubleblind]{cja}
+
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{float}
+%% The lineno packages adds line numbers. Start line numbering with
+%% \begin{linenumbers}, end it with \end{linenumbers}. Or switch it on
+%% for the whole article with \linenumbers.
+%% \usepackage{lineno}
+\usepackage{hyperref}
+\usepackage{cleveref}
+%------------------------ add new------------------------------
+\let\openbox\relax % Resolve conflict with \openbox
+\usepackage{color,array,amsthm}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{subfigure}
+\usepackage{amssymb}
+
+
+\usepackage[utf8]{inputenc}
+\usepackage{textcomp}
+\usepackage[version=4]{mhchem}
+\usepackage{siunitx}
+\usepackage{longtable,tabularx}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\setcounter{page}{1}
+%% \setcounter{secnumdepth}{0}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{lscape}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{amssymb}%空集符号
+\floatname{algorithm}{Algorithm}
+\renewcommand{\algorithmicrequire}{\textbf{输入:}}
+\renewcommand{\algorithmicensure}{\textbf{输出:}}
+% ----------------------------------------------------------------
+
+\begin{document}
+
+%% Title, authors and addresses
+
+%% use the tnoteref command within \title for footnotes;
+%% use the tnotetext command for theassociated footnote;
+%% use the fnref command within \author or \address for footnotes;
+%% use the fntext command for theassociated footnote;
+%% use the corref command within \author for corresponding author footnotes;
+%% use the cortext command for theassociated footnote;
+%% use the ead command for the email address,
+%% and the form \ead[url] for the home page:
+%% \title{Title\tnoteref{label1}}
+%% \tnotetext[label1]{}
+%% \author{Name\corref{cor1}\fnref{label2}}
+%% \ead{email address}
+%% \ead[url]{home page}
+%% \fntext[label2]{}
+%% \cortext[cor1]{}
+%% \affiliation{organization={},
+%%             addressline={},
+%%             city={},
+%%             postcode={},
+%%             state={},
+%%             country={}}
+%% \fntext[label3]{}
+
+
+
+\title{A Game-Theoretic and Theory-Guided Reinforcement Learning Framework for Hierarchical Tactical Decision and Local Trajectory Planning in Multi-Vehicle Autonomous Racing}
+% \title{Swarm Interception Strategy for Maneuvering Targets with Impact‑Time–Coordinated Multi‑Agent RL and IDBO‑Based Target Assignment}
+
+% For use in header
+% \shorttitle{Generation \dots}
+
+%% use optional labels to link authors explicitly to addresses:
+%% \author[label1,label2]{}
+%% \affiliation[label1]{organization={},
+%%             addressline={},
+%%             city={},
+%%             postcode={},
+%%             state={},
+%%             country={}}
+%%
+%% \affiliation[label2]{organization={},
+%%             addressline={},
+%%             city={},
+%%             postcode={},
+%%             state={},
+%%             country={}}
+
+% Author affiliations should be listed according to the name order under the paper title.
+% Chinese authors should put the family name first.
+% The corresponding author should be marked with ``*'' on the top right.
+
+%%%%%%%%%%%%%作者信息%%%%%%%%%%%%%%%%%%%%%%
+% \author[a]{Shuyi GAO}
+% % \ead{bitgaoshuyi@163.com}
+
+% \author[a]{Defu Lin}
+% % \ead{lindf@bit.edu.cn}
+
+% \author[a]{Duo Zheng\corref{cor}}
+% \ead{zhengduohello@126.com}
+
+% \author[a]{Zhichen Chu}
+
+
+% % For use in header
+% \shortauthors{S. GAO and F. LIN and D. ZHENG and C. CHU}
+
+% \cortext[cor]{Corresponding author}
+
+% \affiliation[a]{
+%   organization = {School of Aerospace Engineering, Beijing Institute of Technology},
+%   city         = {Beijing},
+%   postcode     = {100081},
+%   country      = {China},
+% }
+
+%%%%%%%%%%%%%作者信息%%%%%%%%%%%%%%%%%%%%%%
+
+% \affiliation[b]{
+%   organization = {bSchool of Electronic and Information Engineering, Duke University},
+%   city         = {Durham NC},
+%   postcode     = {27708},
+%   country      = {USA},
+% }
+
+\begin{abstract}
+
+
+% The swarm attack of unmanned aerial vehicles (UAVs) poses a significant threat to future battlefield operations.
+% Achieving efficient and precise cooperative interception against attacking UAV swarms with highly dynamic maneuvering capabilities and adaptive penetration strategies poses a critical challenge for UAV interceptor swarms.
+% This study addresses the cooperative interception of maneuvering targets in swarm attacks by decomposing the problem into two key tasks: target assignment and cooperative interception guidance. For target assignment, an Improved Dung Beetle Optimization (IDBO) algorithm, is proposed to dynamically balance exploration and exploitation, achieving highly efficient and rapid assignments.  For cooperative interception guidance, a multi-agent deep reinforcement learning-based method is developed to achieve precise and time-coordinated interception of adversarial UAV swarms employing advanced penetration strategies.
+% The simulation results validate the effectiveness of the proposed intelligent cooperative interception method, demonstrating superior convergence speed, robustness, and significantly improved interception success rates in swarm UAV cooperative interception scenarios.
+
+
+
+
+\end{abstract}
+
+\begin{keyword}
+  %% keywords here, in the form: keyword \sep keyword
+  % Cooperative interception \sep
+  % Deep reinforcement learning \sep
+  % Centralized Training with Decentralized Execution 
+
+ 
+\end{keyword}
+
+% For editors
+% \frontheader{Chinese Journal of Aeronautics, (year), \textbf{volum}(number): page--page}
+% \articledoi{https://doi.org/10.1016/j.cja.2021.00.000}
+% \frontfooter{%
+%   1000-9361 © 2021 Chinese Society of Aeronautics and Astronautics.
+%   Production and hosting by Elsevier Ltd.\par
+%   This is an open access article under the CC BY-NC-ND license
+%   (\url{http://creativecommons.org/licenses/by-nc-nd/4.0/}).
+% }
+% \received{1 June 2021}
+% \revised{1 June 2021}
+% \accepted{1 June 2021}
+% \availableonline{1 June 2021}
+% \setcounter{page}{3138}
+
+\maketitle
+
+%% \linenumbers
+
+
+\section{Introduction}
+
+Autonomous racing has become an important benchmark for motion planning and decision making at the limits of vehicle handling. Compared with ordinary road driving, autonomous racing features higher speed, stronger vehicle dynamics, smaller reaction margins, and substantially more aggressive multi-vehicle interactions. As a result, the planning system must not only generate dynamically feasible trajectories, but also make tactical decisions under strong competition, uncertainty, and adversarial responses from opponents. Recent surveys on autonomous racing and autonomous driving consistently point out that high-speed interactive racing is a representative setting in which planning, decision making, and control are tightly coupled rather than separable modules. \cite{liniger2021survey,hu2025survey,reda2024path}
+
+From the perspective of local trajectory generation, existing methods can be broadly categorized into several classes. The first class consists of search- and graph-based planners, which discretize the state or maneuver space and search for admissible local paths. The second class consists of sampling-based planners, which generate candidate trajectories in continuous state space and select the most suitable one according to feasibility and cost. The third class consists of optimization-based planners, including model predictive control and trajectory optimization methods, which directly solve constrained finite-horizon optimal control problems and are particularly attractive for racing near the handling limits. In addition, learning-based local planners have also emerged in recent years, although model-based approaches remain dominant in safety-critical racing applications due to their interpretability and constraint-handling capability. \cite{reda2024path,hu2025survey,liniger2021survey,turner2025local} 
+
+Although these local trajectory planning methods have achieved strong performance in lane keeping, obstacle avoidance, and even short-horizon overtaking, they remain fundamentally limited when used alone in highly dynamic racing games. In a multi-vehicle competitive scene, a pure local planner is typically horizon-limited and interaction-reactive: it may find a locally feasible evasive or overtaking path, but it often lacks explicit tactical reasoning about whether to attack or follow, which side to occupy, how aggressive the maneuver should be, and whether the resulting terminal posture is favorable for the next planning cycle. In racing, such short-sightedness may lead to undesirable terminal states, unstable maneuver switching, or loss of recursive feasibility in subsequent replanning. This limitation has motivated the introduction of an explicit tactical decision layer above local planning. \cite{liniger2021survey,reiter2024hrlmpc,hu2025survey}
+
+Existing decision-layer methods can also be classified into several categories. A first line of work adopts rule-based or finite-state-machine strategies, where handcrafted conditions are used to trigger following, overtaking, blocking, or recovery behaviors. A second line relies on behavior trees or state-transition logic to improve modularity and engineering robustness. A third line formulates decision making using game-theoretic reasoning, including Stackelberg-style interactions, best-response schemes, and equilibrium-based formulations, in order to explicitly model the opponent-dependent nature of racing tactics. Such knowledge-driven decision layers are often combined with local trajectory optimization or MPC, yielding a hierarchical architecture in which the upper layer decides the tactical intention and the lower layer computes the executable trajectory. \cite{hu2025survey,reiter2024hrlmpc,liniger2021survey}
+
+However, traditional decision-layer plus local-planning architectures still face several important limitations in competitive autonomous racing. First, many conventional tactical layers rely on handcrafted rules or manually designed switching logics, which are often scenario-specific and difficult to scale to dense multi-vehicle interactions. Second, even when game-theoretic reasoning is introduced, the upper-layer tactical variables are often only weakly coupled to the lower-level planner, so the planner still behaves as a largely independent local optimizer rather than a tactically parameterized response module. Third, many methods emphasize immediate maneuver correctness, such as whether overtaking is feasible at the current instant, but do not explicitly encode whether the resulting terminal state will remain favorable for subsequent replanning and future interactions. These issues become particularly severe in racing scenes where the planner must repeatedly make decisions under rapidly changing opponent configurations. \cite{hu2025survey,reiter2024hrlmpc,liniger2021survey}
+
+To improve adaptability in such dynamic racing scenarios, recent studies have increasingly explored data-driven methods for high-level decision making. Representative directions include imitation learning from expert demonstrations, deep reinforcement learning for lane change and overtaking decisions, end-to-end tactical policies, and hierarchical policies for maneuver selection. These methods are attractive because they can learn tactical preferences directly from interaction data and are often more flexible than purely handcrafted decision rules. In particular, learning-based tactical decision layers have shown strong potential in interactive autonomous racing, since they can adapt their maneuver selection to rapidly changing opponent configurations and racing contexts.  \cite{irshayyid2024rlreview,reiter2024hrlmpc,pathare2025truck}
+
+Nevertheless, existing data-driven approaches still leave a critical gap for multi-vehicle autonomous racing. On the one hand, purely data-driven tactical policies often lack a sufficiently strong game-theoretic structure, making them less interpretable and less consistent with the adversarial nature of racing interactions. On the other hand, many learning-based methods either output overly abstract maneuver labels or directly produce low-level actions, without establishing a principled and optimization-compatible interface to a constrained local trajectory planner. As a result, the learned tactical behavior may be difficult to align with the geometric, dynamic, and recursive-feasibility requirements of a lower-level racing planner. More importantly, current methods rarely unify three aspects within one framework: explicit opponent-aware tactical reasoning, learning-based tactical adaptability, and terminal-state guidance that preserves the sustainability of subsequent local replanning. \cite{reiter2024hrlmpc,hu2025survey,irshayyid2024rlreview}
+
+To address the above issues, this paper proposes a hierarchical game-theoretic decision and local trajectory planning framework for multi-vehicle autonomous racing. At the upper layer, we formulate tactical decision making as a Stackelberg--IBR bi-level game and derive a theory-guided reinforcement learning policy that approximates the tactical equilibrium. At the lower layer, we construct a tactically parameterized local trajectory optimizer in the Frenet frame, where the tactical outputs are transformed into structured guidance variables that directly shape the interaction envelope, corridor occupancy, terminal target set, and optimization weights of the local OCP. In this way, the upper layer determines what tactical maneuver should be executed, while the lower layer determines how to realize it through a dynamically feasible local trajectory.
+
+The main contributions of this paper are summarized as follows:
+\begin{itemize}
+    \item We propose a Stackelberg--IBR game-theoretic tactical decision model for multi-vehicle autonomous racing, and explicitly incorporate recursive-plannability considerations into the upper-layer tactical utility, enabling the decision layer to account for both current tactical advantage and future local-planning sustainability.
+    \item We develop a theory-guided hybrid reinforcement learning framework to approximate the tactical equilibrium, where the learning process is guided by game-theoretic rewards, safe action masking, and equilibrium-inspired priors, rather than relying solely on sparse overtaking rewards.
+    \item We design a tactically parameterized interface between the upper-layer decision policy and the lower-layer local trajectory optimizer, so that the tactical outputs directly modulate the interaction safety budget, passing-side homotopy, corridor reference field, terminal target set, and cost weights of the local OCP, yielding a tightly coupled hierarchical racing planner.
+\end{itemize}
+
+
+\section{Problem Description}
+\label{sec:problem_description}
+
+We consider a multi-vehicle autonomous racing scenario on a closed track, where the ego racecar interacts with multiple surrounding opponents under highly dynamic and competitive conditions. Different from standard road-driving scenarios, autonomous racing requires the ego vehicle to continuously make tactical decisions such as following, overtaking, defending, and recovering, while simultaneously generating dynamically feasible local trajectories near the handling limits.
+
+Let the set of all vehicles be denoted by
+\begin{equation}
+\mathcal{N}=\{1,2,\dots,M\},
+\label{eq:vehicle_set}
+\end{equation}
+and let the ego vehicle be indexed by $e \in \mathcal{N}$. At time step $k$, the global interaction state is defined as
+\begin{equation}
+X^k = \mathrm{col}(x_1^k,x_2^k,\dots,x_M^k),
+\label{eq:global_interaction_state}
+\end{equation}
+where $x_i^k$ is the state of vehicle $i$.
+
+The objective of the ego vehicle is not only to maximize racing performance, such as progress and overtaking advantage, but also to maintain safety and preserve recursive replanning feasibility in a strongly interactive environment. Therefore, the problem cannot be treated as a purely local obstacle-avoidance or trajectory-smoothing problem. Instead, it is naturally formulated as a hierarchical tactical decision and local trajectory planning problem.
+
+At the upper layer, the ego vehicle selects a hybrid tactical action
+\begin{equation}
+a_k=(d_k,c_k),
+\label{eq:high_level_action_problem}
+\end{equation}
+where
+\begin{equation}
+d_k=(m_k,\ell_k),
+\qquad
+c_k=(\alpha_k,\rho_k).
+\label{eq:high_level_action_components_problem}
+\end{equation}
+Here, $d_k$ denotes the discrete tactical decision, with $m_k$ being the tactical mode and $\ell_k$ being the lateral intention, while $c_k$ denotes the continuous tactical parameter vector, in which $\alpha_k$ is the aggressiveness level and $\rho_k$ is the terminal tactical preference.
+
+
+
+
+At the lower layer, the tactical action is transformed into planner guidance variables
+\begin{equation}
+\vartheta_k=\mathcal{T}(a_k,o_k),
+\label{eq:tactical_mapping_problem}
+\end{equation}
+and the local planner computes the optimal short-horizon trajectory
+\begin{equation}
+\xi_e^\star=\mathcal{R}_e(X_k;\vartheta_k).
+\label{eq:lower_response_problem}
+\end{equation}
+
+Accordingly, the overall goal of the proposed framework is to determine a tactical decision and a feasible local trajectory such that the ego vehicle can achieve competitive racing behavior while respecting track boundaries, dynamic constraints, and inter-vehicle safety requirements.
+
+More specifically, the considered problem is to design a hierarchical decision--planning framework such that:
+\begin{enumerate}
+    \item the upper layer can reason about multi-vehicle tactical interactions in racing scenarios;
+    \item the lower layer can generate dynamically feasible local trajectories consistent with the selected tactical intention;
+    \item the resulting terminal state remains favorable for the next replanning cycle, thereby maintaining recursive tactical and planning consistency.
+\end{enumerate}
+
+\subsection{Scene Assumptions}
+\label{subsec:scene_assumptions}
+
+The following assumptions are adopted throughout this paper.
+
+\begin{itemize}
+    \item The track centerline and its local geometric properties are known.
+    \item The current ego state and opponent states can be estimated online.
+    \item Short-horizon opponent predictions are available to the local planner.
+    \item The lower-layer planner runs in a receding-horizon fashion and repeatedly updates the local trajectory.
+    \item The upper-layer tactical decision is updated at a slower but synchronized rate and provides guidance to the lower layer through a structured planner interface.
+\end{itemize}
+
+\subsection{Hierarchical Racing Game Structure}
+\label{subsec:hierarchical_game_structure}
+
+Under the above setting, the multi-vehicle racing problem is viewed as a hierarchical dynamic game. The upper layer is responsible for selecting the tactical maneuver class, side preference, aggressiveness, and terminal posture, while the lower layer realizes such tactical commands through constrained local trajectory optimization.
+
+The complete hierarchical pipeline can be summarized as
+\begin{equation}
+a_k
+\;\xrightarrow{\;\mathcal{T}\;}
+\vartheta_k
+\;\xrightarrow{\;\mathcal{R}_e\;}
+\xi_e^\star
+\;\xrightarrow{\;\text{execution}\;}
+X^{k+1}.
+\label{eq:hierarchical_pipeline_problem}
+\end{equation}
+
+
+\begin{figure}[hbt!]
+\centerline{\includegraphics[width=25.5pc]{GeminiGeneratedImage.png}}
+\caption{Schematic illustration of the hierarchical autonomous racing problem, showing the ego vehicle, multiple opponents, the racing track, the upper tactical decision layer, and the lower local trajectory planning layer.}
+\label{fig:hierarchical_pipeline_problem}
+\end{figure}
+
+
+
+
+\section{Vehicle and Interaction Modeling}
+\label{sec:modeling}
+
+In this section, we establish the geometric, dynamic, and interaction models used in the subsequent algorithm design.
+
+\subsection{Track Geometry and Frenet Coordinates}
+\label{subsec:track_geometry}
+
+Let the track centerline be parameterized by the arc-length variable $s$ as
+\begin{equation}
+\mathbf{r}_c(s)=
+\begin{bmatrix}
+x_c(s)\\
+y_c(s)
+\end{bmatrix},
+\label{eq:centerline}
+\end{equation}
+with tangent heading angle
+\begin{equation}
+\theta_c(s)=\mathrm{atan2}\!\left(\frac{dy_c}{ds},\frac{dx_c}{ds}\right),
+\label{eq:centerline_heading}
+\end{equation}
+and curvature
+\begin{equation}
+\kappa(s)=\frac{d\theta_c(s)}{ds}.
+\label{eq:centerline_curvature}
+\end{equation}
+
+The Frenet coordinate of a vehicle is defined by the pair $(s,n)$, where $s$ is the longitudinal arc-length coordinate and $n$ is the lateral offset from the centerline along the local normal direction. Let $\chi$ denote the heading deviation relative to the track tangent. Then the vehicle state can be naturally represented in the Frenet frame.
+
+
+\begin{figure}[hbt!]
+\centerline{\includegraphics[width=25.5pc]{frenet.png}}
+\caption{Frenet-frame geometric illustration showing centerline, tangent angle, normal direction, vehicle position, lateral offset $n$, arc-length coordinate $s$, and heading deviation $\chi$.}
+\label{fig:frenet}
+\end{figure}
+
+
+\subsection{Ego Vehicle Model}
+\label{subsec:ego_vehicle_model}
+
+To maintain consistency with the lower-layer planner, we adopt a Frenet-domain point-mass trajectory model with acceleration and jerk states. The ego state is defined as
+\begin{equation}
+x_e =
+\begin{bmatrix}
+s_e \\
+V_e \\
+n_e \\
+\chi_e \\
+a_{x,e} \\
+a_{y,e}
+\end{bmatrix},
+\label{eq:ego_state}
+\end{equation}
+where $s_e$ is the arc-length coordinate, $V_e$ is the speed, $n_e$ is the lateral offset, $\chi_e$ is the heading deviation, and $a_{x,e},a_{y,e}$ are the longitudinal and lateral accelerations, respectively.
+
+The control input is defined as
+\begin{equation}
+u_e=
+\begin{bmatrix}
+j_{x,e}\\
+j_{y,e}
+\end{bmatrix},
+\label{eq:ego_control}
+\end{equation}
+where $j_{x,e}$ and $j_{y,e}$ denote the longitudinal and lateral jerks.
+
+The continuous-time vehicle dynamics in the Frenet frame are modeled as
+\begin{equation}
+\dot s_e = \frac{V_e \cos\chi_e}{1-\kappa(s_e)n_e},
+\label{eq:sdot}
+\end{equation}
+\begin{equation}
+\dot n_e = V_e \sin\chi_e,
+\label{eq:ndot}
+\end{equation}
+\begin{equation}
+\dot V_e = a_{x,e},
+\label{eq:vdot}
+\end{equation}
+\begin{equation}
+\dot \chi_e = \frac{a_{y,e}}{\max(V_e,\epsilon_v)} - \kappa(s_e)\dot s_e,
+\label{eq:chidot}
+\end{equation}
+\begin{equation}
+\dot a_{x,e} = j_{x,e},
+\qquad
+\dot a_{y,e} = j_{y,e},
+\label{eq:axaydot}
+\end{equation}
+where $\epsilon_v>0$ is a small positive constant to avoid singularity when the speed is close to zero.
+
+The above model is sufficiently expressive for local tactical trajectory generation while remaining computationally efficient for real-time receding-horizon optimization.
+
+\subsection{Opponent Modeling}
+\label{subsec:opponent_modeling}
+
+For each opponent vehicle $j \in \mathcal{N}_{-e}$, we use the same Frenet-coordinate representation
+\begin{equation}
+x_j =
+\begin{bmatrix}
+s_j \\
+V_j \\
+n_j \\
+\chi_j
+\end{bmatrix}.
+\label{eq:opponent_state}
+\end{equation}
+
+Since the lower-layer planner only requires short-horizon opponent predictions, we do not require a full dynamic game model at the planning layer. Instead, the planner receives a short-horizon predicted opponent trajectory
+\begin{equation}
+\hat x_j^{k:k+N}
+=
+\left\{
+\hat x_j^k,\hat x_j^{k+1},\dots,\hat x_j^{k+N}
+\right\},
+\label{eq:opponent_prediction}
+\end{equation}
+which is used to construct the interaction-aware feasible corridor.
+
+\subsection{Relative Interaction State}
+\label{subsec:relative_interaction_model}
+
+To support the upper-layer game-theoretic decision making, we define the relative interaction state between the ego vehicle and opponent $j$ as
+\begin{equation}
+z_{ej}=
+\begin{bmatrix}
+\Delta s_{ej}\\
+\Delta n_{ej}\\
+\Delta v_{ej}\\
+\Delta \chi_{ej}
+\end{bmatrix}
+=
+\begin{bmatrix}
+s_j-s_e\\
+n_j-n_e\\
+V_j-V_e\\
+\chi_j-\chi_e
+\end{bmatrix}.
+\label{eq:relative_state_modeling}
+\end{equation}
+
+This relative-state representation is used by the upper tactical layer to evaluate overtaking opportunities, defensive requirements, and safety risks under multi-vehicle interactions.
+
+% \paragraph{[Insert Fig.~3 here]}
+% \textbf{Suggested figure:} Relative interaction geometry between ego and opponent vehicles in the Frenet frame, showing $\Delta s$, $\Delta n$, left/right passing side, and safety interaction region.
+
+\begin{figure}[hbt!]
+\centerline{\includegraphics[width=25.5pc]{attdef.png}}
+\caption{Relative interaction geometry between ego and opponent vehicles in the Frenet frame, showing $\Delta s$, $\Delta n$, left/right passing side, and safety interaction region.}
+\label{fig:relative_interaction}
+\end{figure}
+
+\subsection{Interaction Safety Model}
+\label{subsec:interaction_safety_model}
+
+To describe the tactical interaction safety between the ego vehicle and opponent $j$, we introduce an elliptic safety function
+\begin{equation}
+h_{ej}(z_{ej};\alpha_e)
+=
+\left(\frac{\Delta s_{ej}}{d_s(\alpha_e)}\right)^2
++
+\left(\frac{\Delta n_{ej}}{d_n(\alpha_e)}\right)^2
+-1,
+\label{eq:safety_function_modeling}
+\end{equation}
+where $d_s(\alpha_e)$ and $d_n(\alpha_e)$ denote the longitudinal and lateral safety margins, respectively, and are modulated by the tactical aggressiveness level $\alpha_e$:
+\begin{equation}
+d_s(\alpha_e)=d_s^{\max}-\alpha_e(d_s^{\max}-d_s^{\min}),
+\label{eq:ds_alpha}
+\end{equation}
+\begin{equation}
+d_n(\alpha_e)=d_n^{\max}-\alpha_e(d_n^{\max}-d_n^{\min}).
+\label{eq:dn_alpha}
+\end{equation}
+
+The condition
+\begin{equation}
+h_{ej}(z_{ej};\alpha_e)\ge 0
+\label{eq:safety_condition}
+\end{equation}
+means that the ego vehicle remains outside the interaction safety envelope of opponent $j$.
+
+For discrete-time tactical safety reasoning, a one-step barrier-style condition can be written as
+\begin{equation}
+\mathcal{B}_{ej}(z_{ej}^k,a_e^k,a_j^k)
+=
+h_{ej}(z_{ej}^{k+1};\alpha_e^k)
+-
+(1-\eta)h_{ej}(z_{ej}^{k};\alpha_e^k)
+\ge 0,
+\label{eq:barrier_modeling}
+\end{equation}
+where $\eta\in(0,1]$ is the barrier contraction factor.
+
+This interaction safety model is used by the upper-layer tactical game to define the safety-admissible tactical action set, and by the lower-layer planner to shape the opponent-aware feasible corridor.
+
+\subsection{Local Planning Model}
+\label{subsec:local_planning_model}
+
+The lower-layer local planner computes a short-horizon trajectory over a spatial horizon $L_h$ discretized into $N$ spatial intervals, yielding $N+1$ shooting nodes:
+\begin{equation}
+s_i = s_0 + i\Delta s,\qquad
+\Delta s = \frac{L_h}{N},
+\qquad i=0,\dots,N.
+\label{eq:planning_grid}
+\end{equation}
+
+The local optimal response is written as
+\begin{equation}
+\xi_e^\star
+=
+\mathcal{R}_e(X_k;\vartheta_k)
+=
+\arg\min_{\xi_e}
+J_e^{\mathrm{L}}(\xi_e;X_k,\vartheta_k)
+\quad
+\text{s.t.}
+\quad
+\xi_e\in\mathcal{F}_e(X_k;\vartheta_k),
+\label{eq:local_ocp_modeling}
+\end{equation}
+where:
+\begin{itemize}
+    \item the objective $J_e^{\mathrm{L}}$ contains progress, smoothness, interaction-guidance, and terminal tactical consistency terms;
+    \item the feasible set $\mathcal{F}_e$ contains vehicle dynamics, boundary constraints, opponent-induced corridor constraints, and soft dynamic constraints.
+\end{itemize}
+
+The final executable local trajectory is obtained by time-domain reconstruction and Cartesian transformation:
+\begin{equation}
+\Xi_e =
+\left\{
+x(t),y(t),\psi(t),v(t),\kappa(t)
+\right\}_{t=0}^{T_{\mathrm{out}}}.
+\label{eq:final_trajectory_modeling}
+\end{equation}
+
+\subsection{Problem Statement of the Proposed Framework}
+\label{subsec:final_problem_statement}
+
+Combining the tactical game and the lower-layer planner, the problem addressed in this paper can be summarized as follows:
+
+\emph{Given the current multi-vehicle interaction state $X_k$, design a hierarchical tactical decision and local trajectory planning framework such that the ego vehicle can generate tactical actions $a_k$ and executable local trajectories $\Xi_e$ that maximize racing utility, satisfy interaction safety, and preserve recursive tactical and planning consistency in multi-vehicle autonomous racing scenarios.}
+
+The complete hierarchical pipeline is
+\begin{equation}
+a_k
+\;\xrightarrow{\;\mathcal{T}\;}
+\vartheta_k
+\;\xrightarrow{\;\mathcal{R}_e\;}
+\xi_e^\star
+\;\xrightarrow{\;\text{reconstruction}\;}
+\Xi_e,
+\label{eq:problem_pipeline}
+\end{equation}
+which provides the modeling basis for the game-theoretic tactical decision layer, the theory-guided hybrid reinforcement learning policy, and the tactically parameterized local planner introduced in the subsequent sections.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Game-Theoretic Tactical Decision Layer for Hierarchical Autonomous Racing}
+\label{sec:method_game}
+
+This section develops a game-theoretic tactical decision layer for multi-vehicle autonomous racing. The proposed framework is hierarchical: a high-level tactical game module determines the racing intention, while a low-level local trajectory optimizer generates dynamically feasible trajectories under the issued tactical command. Unlike conventional end-to-end decision making, the proposed method explicitly models the interaction between tactical decisions and local planning responses, leading to a Stackelberg--IBR bi-level game formulation.
+
+
+
+
+\subsection{Hierarchical Problem Formulation}
+\label{subsec:hierarchical_problem}
+
+Consider a race scenario with $M$ interacting vehicles on a track. For vehicle $i$, let its Frenet-frame state at time step $k$ be
+\begin{equation}
+x_i^k =
+\begin{bmatrix}
+s_i^k \\
+n_i^k \\
+v_i^k \\
+\chi_i^k
+\end{bmatrix},
+\label{eq:vehicle_state}
+\end{equation}
+where $s_i^k$ is the arc-length coordinate along the reference line, $n_i^k$ is the lateral offset, $v_i^k$ is the longitudinal speed, and $\chi_i^k$ is the heading deviation with respect to the track tangent.
+
+Let the global interaction state be
+\begin{equation}
+X^k = \mathrm{col}(x_1^k,\dots,x_M^k).
+\label{eq:global_state}
+\end{equation}
+
+For the ego vehicle $e$, the high-level tactical action is defined as a hybrid action
+\begin{equation}
+a_e^k = \left(d_e^k,c_e^k\right),
+\label{eq:tactical_action}
+\end{equation}
+where
+\begin{equation}
+d_e^k := \left(m_e^k,\ell_e^k\right)\in \mathcal{D}_e,
+\qquad
+c_e^k := \left(\alpha_e^k,\rho_e^k\right)\in \mathcal{C}_e.
+\label{eq:tactical_action_components}
+\end{equation}
+Here, $d_e^k$ denotes the discrete tactical mode--intent decision, with $m_e^k \in \mathcal{M}$ representing the tactical mode and $\ell_e^k \in \mathcal{L}$ representing the lateral intention. The vector $c_e^k$ collects the continuous tactical parameters, where $\alpha_e^k \in [0,1]$ denotes the aggressiveness level and $\rho_e^k \in \mathbb{R}^p$ denotes the terminal preference and planner-guidance vector.
+
+Accordingly, the upper-layer interaction is a mixed discrete--continuous tactical game rather than a purely continuous game. The analytical regularity results established later in this section therefore apply to the conditioned continuous subgame obtained under fixed discrete tactical candidates.
+
+
+The low-level trajectory planner is represented by a parameterized optimal response operator. Given the current state $x_i^k$, the predicted motion of other vehicles $\hat X_{-i}^{k:k+N}$, and the planner guidance variable $\vartheta_i^k$, the planner solves
+\begin{equation}
+\mathcal{R}_i(x_i^k,\hat X_{-i}^{k:k+N};\vartheta_i^k)
+:=
+\arg\min_{\xi_i}
+J_i^{\mathrm{L}}(\xi_i; x_i^k,\hat X_{-i}^{k:k+N},\vartheta_i^k)
+\label{eq:lower_response}
+\end{equation}
+subject to
+\begin{equation}
+\xi_i \in \mathcal{F}_i(x_i^k,\hat X_{-i}^{k:k+N};\vartheta_i^k),
+\label{eq:lower_feasible_set}
+\end{equation}
+where $\xi_i$ denotes the local trajectory decision variables and $\mathcal{F}_i$ denotes the feasible set induced by vehicle dynamics, track boundaries, obstacle avoidance, and soft safety-related constraints.
+
+Thus, the high-level tactical layer does not directly generate trajectories. Instead, it produces semantic tactical variables that are later mapped into planner guidance variables and realized through the low-level optimal response mapping.
+
+\subsection{Relative Tactical Interaction Model}
+\label{subsec:relative_model}
+
+To characterize short-horizon tactical interactions, we consider the relative state between the ego vehicle $e$ and a relevant opponent vehicle $j$:
+\begin{equation}
+z_{ej}^k =
+\begin{bmatrix}
+\Delta s_{ej}^k \\
+\Delta n_{ej}^k \\
+\Delta v_{ej}^k \\
+\Delta \chi_{ej}^k
+\end{bmatrix}
+=
+\begin{bmatrix}
+s_j^k - s_e^k \\
+n_j^k - n_e^k \\
+v_j^k - v_e^k \\
+\chi_j^k - \chi_e^k
+\end{bmatrix}.
+\label{eq:relative_state}
+\end{equation}
+
+Under the hierarchical structure, the relative tactical evolution is implicitly determined by the pair of tactical actions and the associated local planning responses. Accordingly, we write the short-horizon closed-loop interaction model as
+\begin{equation}
+z_{ej}^{k+1}
+=
+\Phi\!\left(z_{ej}^k, a_e^k, a_j^k \right),
+\label{eq:relative_dynamics_general}
+\end{equation}
+where $\Phi(\cdot)$ summarizes the effect of local trajectory optimization and resulting vehicle motion.
+
+
+For local tactical analysis, \eqref{eq:relative_dynamics_general} is represented by a discrete-mode-dependent linearized model:
+\begin{equation}
+z_{ej}^{k+1}
+=
+A(d_e^k,d_j^k)\, z_{ej}^k
++
+B_e(d_e^k,d_j^k)\, c_e^k
++
+B_j(d_e^k,d_j^k)\, c_j^k
++
+\varphi\!\left(z_{ej}^k; d_e^k,d_j^k\right),
+\label{eq:relative_dynamics_linearized}
+\end{equation}
+where the discrete tactical mode--intent pair $(d_e^k,d_j^k)$ determines the local interaction regime, while the continuous tactical parameters $(c_e^k,c_j^k)$ determine the tactical adjustment within that regime. In this way, the discrete tactical variables do not enter the local model as differentiable Euclidean variables, which is consistent with the hybrid nature of the tactical action space.
+
+
+\subsection{High-Level Tactical Utility Function}
+\label{subsec:tactical_utility}
+
+The high-level tactical utility is designed to evaluate racing progress, overtaking/defending effectiveness, safety preservation, terminal sustainability, and tactical smoothness. For vehicle $i$, the tactical utility is decomposed as
+\begin{equation}
+U_i
+=
+U_i^{\mathrm{prog}}
++
+U_i^{\mathrm{race}}
++
+U_i^{\mathrm{safe}}
++
+U_i^{\mathrm{term}}
++
+U_i^{\mathrm{ctrl}}.
+\label{eq:utility_decomposition}
+\end{equation}
+
+\subsubsection{Progress Utility}
+
+The longitudinal progress utility over a tactical horizon of length $H$ is defined as
+\begin{equation}
+U_i^{\mathrm{prog}}
+=
+w_p \left( s_i^{k+H} - s_i^k \right).
+\label{eq:progress_utility}
+\end{equation}
+
+To additionally encode relative tactical advantage, a relative progress term with respect to opponent $j$ can be introduced as
+\begin{equation}
+U_{i,j}^{\mathrm{rel\text{-}prog}}
+=
+w_{rp}
+\left[
+(s_i^{k+H} - s_j^{k+H}) - (s_i^k - s_j^k)
+\right].
+\label{eq:relative_progress_utility}
+\end{equation}
+
+\subsubsection{Racing Interaction Utility}
+
+Define the smooth relative position indicator
+\begin{equation}
+\Gamma_{ij}^k = s_i^k - s_j^k,
+\label{eq:relative_position_indicator}
+\end{equation}
+and its sigmoid-smoothed form
+\begin{equation}
+P_{ij}^k
+=
+\sigma\!\left( \frac{\Gamma_{ij}^k}{\varepsilon_s} \right),
+\qquad
+\sigma(x)=\frac{1}{1+e^{-x}},
+\label{eq:smooth_position_advantage}
+\end{equation}
+where $\varepsilon_s>0$ is a smoothing parameter.
+
+The overtaking gain of vehicle $i$ relative to vehicle $j$ is defined as
+\begin{equation}
+U_{i,j}^{\mathrm{ot}}
+=
+w_{ot}\left( P_{ij}^{k+H} - P_{ij}^k \right),
+\label{eq:overtake_gain}
+\end{equation}
+which becomes positive when vehicle $i$ improves its relative rank against vehicle $j$.
+
+Similarly, the defending utility is defined as
+\begin{equation}
+U_{i,j}^{\mathrm{def}}
+=
+w_{def}\,
+P_{ij}^{k}
+\left( P_{ij}^{k+H} - \underline P_{safe} \right),
+\label{eq:defense_gain}
+\end{equation}
+where $\underline P_{safe}$ is a threshold indicating that the leading position is preserved with sufficient confidence.
+
+Hence, the racing interaction utility is written as
+\begin{equation}
+U_i^{\mathrm{race}}
+=
+\sum_{j \in \mathcal{N}_{-i}}
+\left(
+U_{i,j}^{\mathrm{ot}} + U_{i,j}^{\mathrm{def}}
+\right).
+\label{eq:racing_interaction_utility}
+\end{equation}
+
+\subsubsection{Safety Utility}
+
+To account for collision risk under different aggressiveness levels, we define an elliptic safety function between vehicle $i$ and vehicle $j$:
+\begin{equation}
+h_{ij}(z_{ij};\alpha_i)
+=
+\left( \frac{\Delta s_{ij}}{d_s(\alpha_i)} \right)^2
++
+\left( \frac{\Delta n_{ij}}{d_n(\alpha_i)} \right)^2
+-1,
+\label{eq:elliptic_safety_function}
+\end{equation}
+where
+\begin{equation}
+d_s(\alpha_i)=d_s^{\max}-\alpha_i\left(d_s^{\max}-d_s^{\min}\right),
+\label{eq:longitudinal_safety_scale}
+\end{equation}
+\begin{equation}
+d_n(\alpha_i)=d_n^{\max}-\alpha_i\left(d_n^{\max}-d_n^{\min}\right).
+\label{eq:lateral_safety_scale}
+\end{equation}
+
+The condition $h_{ij}(z_{ij};\alpha_i)\ge 0$ indicates that the two vehicles remain outside the safety ellipse. To obtain a differentiable penalty, we define
+\begin{equation}
+R_{ij}^{\mathrm{safe}}
+=
+\psi\!\left(-h_{ij}(z_{ij};\alpha_i)\right),
+\label{eq:safety_penalty}
+\end{equation}
+where $\psi(\cdot)$ is a monotonically increasing nonnegative function, such as the softplus function.
+
+Thus, the safety utility is defined as
+\begin{equation}
+U_i^{\mathrm{safe}}
+=
+-
+\sum_{j\in\mathcal{N}_{-i}}
+w_{safe,j}\,
+R_{ij}^{\mathrm{safe}}.
+\label{eq:safety_utility}
+\end{equation}
+
+\subsubsection{Terminal Tactical Sustainability Utility}
+
+Let the terminal state of the low-level plan be
+\begin{equation}
+x_i^{N}=
+\begin{bmatrix}
+s_i^{N}\\
+n_i^{N}\\
+v_i^{N}\\
+\chi_i^{N}
+\end{bmatrix},
+\label{eq:terminal_state}
+\end{equation}
+and let the tactical command define a terminal reference
+\begin{equation}
+x_{i,\mathrm{ref}}^{N}(a_i)
+=
+\begin{bmatrix}
+s_{i,\mathrm{ref}}^{N}\\
+n_{i,\mathrm{ref}}^{N}\\
+v_{i,\mathrm{ref}}^{N}\\
+\chi_{i,\mathrm{ref}}^{N}
+\end{bmatrix}.
+\label{eq:terminal_reference}
+\end{equation}
+
+The terminal pose consistency term is defined as
+\begin{equation}
+\Phi_i^{\mathrm{pose}}
+=
+-
+\left[
+q_n (n_i^N-n_{i,\mathrm{ref}}^N)^2
++
+q_\chi (\chi_i^N-\chi_{i,\mathrm{ref}}^N)^2
++
+q_v (v_i^N-v_{i,\mathrm{ref}}^N)^2
+\right].
+\label{eq:terminal_pose_term}
+\end{equation}
+
+Let the feasible lateral corridor at the terminal stage be
+\begin{equation}
+\mathcal{C}_i^N = [n_{i,\min}^N,\;n_{i,\max}^N],
+\label{eq:terminal_corridor}
+\end{equation}
+with width
+\begin{equation}
+W_i^N = n_{i,\max}^N - n_{i,\min}^N,
+\label{eq:terminal_corridor_width}
+\end{equation}
+and centered margin
+\begin{equation}
+M_i^N
+=
+\min\left\{
+n_i^N-n_{i,\min}^N,\;
+n_{i,\max}^N-n_i^N
+\right\}.
+\label{eq:terminal_corridor_margin}
+\end{equation}
+
+Then the corridor sustainability term is defined as
+\begin{equation}
+\Phi_i^{\mathrm{corr}}
+=
+\omega_W W_i^N + \omega_M M_i^N.
+\label{eq:terminal_corridor_term}
+\end{equation}
+
+If the low-level planner employs slack variables $\epsilon_i^\star$, then the slack penalty term is
+\begin{equation}
+\Phi_i^{\mathrm{slack}}
+=
+-\omega_\epsilon \|\epsilon_i^\star\|_1.
+\label{eq:terminal_slack_term}
+\end{equation}
+
+The terminal tactical sustainability utility is finally given by
+\begin{equation}
+\Phi_{\mathrm{rec},i}
+=
+\Phi_i^{\mathrm{pose}}
++
+\Phi_i^{\mathrm{corr}}
++
+\Phi_i^{\mathrm{slack}},
+\label{eq:recursive_plannability}
+\end{equation}
+and we set
+\begin{equation}
+U_i^{\mathrm{term}} = \lambda_{\mathrm{rec}} \Phi_{\mathrm{rec},i}.
+\label{eq:terminal_utility}
+\end{equation}
+
+\subsubsection{Tactical Smoothness Utility}
+
+To suppress frequent intention switching and frame-to-frame tactical oscillation, we introduce
+\begin{equation}
+U_i^{\mathrm{ctrl}}
+=
+-
+\left(
+\lambda_m \mathbf{1}_{m_i^k \neq m_i^{k-1}}
++
+\lambda_\ell \mathbf{1}_{\ell_i^k \neq \ell_i^{k-1}}
++
+\lambda_\alpha |\alpha_i^k-\alpha_i^{k-1}|
++
+\lambda_\rho \|\rho_i^k-\rho_i^{k-1}\|^2
+\right).
+\label{eq:tactical_smoothness}
+\end{equation}
+
+
+\subsection{Stackelberg Tactical Game with Follower Equilibrium Constraints}
+\label{subsec:stackelberg_game}
+
+Given the current relative tactical state, the ego vehicle is modeled as the leader, while the neighboring interacting vehicles are modeled as followers. Since the tactical action is hybrid, we distinguish between the discrete tactical candidate and the conditioned continuous tactical response. For a follower vehicle $j$, under a fixed discrete tactical profile $d=(d_e,d_{-e})$ and a given ego continuous decision $c_e$, the follower continuous response is obtained by solving
+\begin{equation}
+c_j^\star(d,c_e;z_{ej})
+\in
+\arg\max_{c_j \in \mathcal{C}_j(d_j)}
+U_j(z_{ej},d,c_e,c_j),
+\label{eq:follower_response}
+\end{equation}
+subject to the corresponding continuous tactical feasibility constraints.
+
+Hence, the leader's conditioned Stackelberg tactical decision problem is
+\begin{equation}
+c_e^\star(z_e;d_e)
+\in
+\arg\max_{c_e \in \mathcal{C}_e(d_e)}
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^\star(d,c_e))
+\right).
+\label{eq:leader_stackelberg}
+\end{equation}
+
+To expose the follower equilibrium structure more explicitly, let the follower's conditioned continuous optimization problem be
+\begin{equation}
+\max_{c_j}
+\quad
+U_j(z,d,c_e,c_j)
+\quad
+\text{s.t.}
+\quad
+g_j(z,d,c_e,c_j)\le 0,\;
+h_j(z,d,c_e,c_j)=0,
+\label{eq:follower_constrained_problem}
+\end{equation}
+where the discrete tactical candidate $d$ is fixed.
+
+Define the Lagrangian
+\begin{equation}
+\mathcal{L}_j(c_j,\lambda_j,\mu_j;z,d,c_e)
+=
+U_j(z,d,c_e,c_j)
+-
+\lambda_j^\top g_j(z,d,c_e,c_j)
+-
+\mu_j^\top h_j(z,d,c_e,c_j).
+\label{eq:follower_lagrangian}
+\end{equation}
+
+Then the follower's conditioned continuous optimal response satisfies the KKT conditions
+\begin{equation}
+\nabla_{c_j}\mathcal{L}_j = 0,
+\label{eq:kkt_stationarity}
+\end{equation}
+\begin{equation}
+g_j(z,d,c_e,c_j^\star)\le 0,\qquad
+h_j(z,d,c_e,c_j^\star)=0,
+\label{eq:kkt_primal_feasibility}
+\end{equation}
+\begin{equation}
+\lambda_j^\star \ge 0,
+\label{eq:kkt_dual_feasibility}
+\end{equation}
+\begin{equation}
+\lambda_j^{\star\top} g_j(z,d,c_e,c_j^\star)=0.
+\label{eq:kkt_complementarity}
+\end{equation}
+
+
+\subsection{Stackelberg--IBR Formulation for Multi-Vehicle Interaction}
+\label{subsec:stackelberg_ibr}
+
+In dense racing scenarios, the followers are coupled with each other and cannot be treated as independent responders. Therefore, under a fixed discrete tactical profile $d=(d_e,d_{-e})$, we model the follower layer over the conditioned continuous tactical parameters using an iterative best-response (IBR) process.
+
+For each follower $i \in \mathcal{N}_{-e}$, given the leader hybrid action $a_e=(d_e,c_e)$ and the fixed discrete follower candidates $d_{-e}$, the iterative continuous response at iteration $\nu+1$ is defined as
+\begin{equation}
+c_i^{(\nu+1)}
+\in
+\arg\max_{c_i \in \mathcal{C}_i(d_i)}
+U_i\!\left(
+z_i,\,
+d,\,
+c_e,\,
+c_{-i}^{(\nu)}
+\right).
+\label{eq:ibr_update}
+\end{equation}
+
+If the IBR process converges, the follower conditioned continuous equilibrium is given by
+\begin{equation}
+c_{-e}^{\mathrm{IBR}\star}(d,c_e)
+=
+\lim_{\nu\to\infty}
+c_{-e}^{(\nu)}.
+\label{eq:ibr_equilibrium}
+\end{equation}
+
+The ego vehicle then solves the Stackelberg--IBR problem over the hybrid tactical action:
+\begin{equation}
+a_e^\star
+\in
+\arg\max_{a_e=(d_e,c_e),\; a_e\in \mathcal{A}_e}
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^{\mathrm{IBR}\star}(d,c_e))
+\right).
+\label{eq:leader_stackelberg_ibr}
+\end{equation}
+
+Moreover, if the follower conditioned continuous equilibrium is expressed using a variational inequality, let
+\begin{equation}
+c_{-e} = \mathrm{col}(c_i)_{i\in\mathcal{N}_{-e}},
+\label{eq:follower_stack_vector}
+\end{equation}
+and define the conditioned continuous pseudo-gradient mapping
+\begin{equation}
+G_c(c_{-e};d,c_e)
+=
+\mathrm{col}
+\left(
+-\nabla_{c_i} U_i(z_i,d,c_e,c_{-i})
+\right)_{i\in\mathcal{N}_{-e}}.
+\label{eq:pseudogradient}
+\end{equation}
+
+Then the follower conditioned continuous equilibrium $c_{-e}^\star$ satisfies
+\begin{equation}
+\left\langle
+G_c(c_{-e}^\star;d,c_e),\,
+c_{-e}-c_{-e}^\star
+\right\rangle
+\ge 0,
+\qquad
+\forall c_{-e}\in \mathcal{C}_{-e}(d_{-e}).
+\label{eq:vi_formulation}
+\end{equation}
+
+
+
+
+
+\subsection{Coupling with Low-Level Local Planning}
+\label{subsec:coupling_local_planning}
+
+
+The tactical utility does not depend solely on abstract tactical actions. Instead, it depends on the actual low-level trajectory responses induced by those actions. Therefore, for each vehicle $i$, we define the realized tactical utility as
+\begin{equation}
+U_i
+=
+\mathcal{J}_i\!\left(
+X_k,\,
+a_i,\,
+a_{-i},\,
+\mathcal{R}_i(X_k;\vartheta_i),\,
+\mathcal{R}_{-i}(X_k;\vartheta_{-i})
+\right),
+\label{eq:realized_utility}
+\end{equation}
+where $\vartheta_i=\mathcal{T}(a_i,o_i)$ is the planner-guidance variable.
+
+Accordingly, under a fixed discrete tactical profile, the follower conditioned continuous IBR process becomes
+\begin{equation}
+c_i^{(\nu+1)}
+\in
+\arg\max_{c_i}
+\mathcal{J}_i\!\left(
+X_k,\,
+(d_e,c_e),\,
+(d_i,c_i),\,
+(d_{-i},c_{-i}^{(\nu)}),\,
+\mathcal{R}_i(X_k;\vartheta_i),\,
+\mathcal{R}_{-i}(X_k;\vartheta_{-i}^{(\nu)})
+\right).
+\label{eq:ibr_with_lower_response}
+\end{equation}
+
+
+The ego vehicle optimizes
+\begin{equation}
+a_e^\star
+\in
+\arg\max_{a_e=(d_e,c_e)\in\mathcal{A}_e}
+\left[
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^{\mathrm{IBR}\star}(d,c_e))
+\right)
++
+\lambda_{\mathrm{rec}}
+\Phi_{\mathrm{rec},e}
+\left(
+x_e^N,\,
+\mathcal{R}_e(X_k;\vartheta_e)
+\right)
+\right].
+\label{eq:complete_bilevel_game}
+\end{equation}
+
+
+\subsection{Safety-Constrained Tactical Feasible Set}
+\label{subsec:safety_feasible_set}
+
+To incorporate safety guarantees at the tactical level, we define the discrete-time barrier constraint
+\begin{equation}
+\mathcal{B}_{ij}(z_{ij}^k,a_i^k,a_j^k)
+=
+h_{ij}(z_{ij}^{k+1};\alpha_i^k)
+-
+(1-\eta)
+h_{ij}(z_{ij}^{k};\alpha_i^k),
+\label{eq:barrier_constraint}
+\end{equation}
+with $\eta\in(0,1]$.
+
+A tactical action is deemed safe relative to a realized opponent response if
+\begin{equation}
+\mathcal{B}_{ij}(z_{ij}^k,a_i^k,a_j^k)\ge 0,
+\qquad
+\forall j\in\mathcal{N}_{-i}.
+\label{eq:safe_tactical_constraint}
+\end{equation}
+
+To obtain a definition consistent with the game-theoretic interaction model, let $\mathfrak{B}_j(o_k,a_i)$ denote the admissible response set of opponent vehicle $j$ under observation $o_k$ when vehicle $i$ chooses candidate tactical action $a_i$. Then the safety-admissible tactical action set is defined as
+\begin{equation}
+\mathcal{A}_i^{\mathrm{safe}}(o_k)
+=
+\left\{
+a_i \in \mathcal{A}_i
+\;\middle|\;
+\mathcal{B}_{ij}(z_{ij}^k,a_i,a_j)\ge 0,\;
+\forall j\in\mathcal{N}_{-i},\;
+\forall a_j\in \mathfrak{B}_j(o_k,a_i)
+\right\}.
+\label{eq:safe_tactical_set}
+\end{equation}
+
+That is, tactical safety is defined relative to a set of possible opponent responses rather than by the existence of a favorable opponent action. This definition is consistent with both the Stackelberg-game interpretation and the online safe action masking mechanism introduced later.
+
+The final leader problem is therefore written as
+\begin{equation}
+a_e^\star
+\in
+\arg\max_{a_e=(d_e,c_e)\in\mathcal{A}_e^{\mathrm{safe}}(o_k)}
+\left[
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^{\mathrm{IBR}\star}(d,c_e))
+\right)
++
+\lambda_{\mathrm{rec}}
+\Phi_{\mathrm{rec},e}
+\left(
+x_e^N,\,
+\mathcal{R}_e(X_k;\vartheta_e)
+\right)
+\right].
+\label{eq:final_safe_leader_problem}
+\end{equation}
+
+
+
+\subsection{Robust Stackelberg Tactical Value}
+\label{subsec:robust_value}
+
+In practice, the exact follower equilibrium may be unavailable or only approximately realized. Therefore, under a fixed discrete tactical profile $d=(d_e,d_{-e})$, we define a robust follower continuous-response set
+\begin{equation}
+\mathfrak{R}_{-e}(d,c_e)
+=
+\left\{
+c_{-e}\in\mathcal{C}_{-e}(d_{-e})
+\mid
+\left\|c_{-e}-c_{-e}^{\mathrm{IBR}\star}(d,c_e)\right\|\le \delta
+\right\},
+\label{eq:robust_response_set}
+\end{equation}
+where $\delta \ge 0$ denotes the uncertainty radius.
+
+The robust tactical value of the ego vehicle is then defined as
+\begin{equation}
+\underline{\mathcal{V}}_e(a_e)
+=
+\underline{\mathcal{V}}_e(d_e,c_e)
+=
+\min_{c_{-e}\in\mathfrak{R}_{-e}(d,c_e)}
+\left[
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e})
+\right)
++
+\lambda_{\mathrm{rec}}
+\Phi_{\mathrm{rec},e}
+\left(
+x_e^N,\,
+\mathcal{R}_e(X_k;\vartheta_e)
+\right)
+\right].
+\label{eq:robust_tactical_value}
+\end{equation}
+
+
+The robust Stackelberg tactical decision is
+\begin{equation}
+a_e^\star
+\in
+\arg\max_{a_e\in\mathcal{A}_e^{\mathrm{safe}}(o_k)}
+\underline{\mathcal{V}}_e(a_e).
+\label{eq:robust_stackelberg_policy}
+\end{equation}
+
+
+
+\subsection{Local Existence of Tactical Equilibrium}
+\label{subsec:equilibrium_existence}
+
+\textbf{Proposition 1.}
+\emph{
+Consider a fixed discrete tactical profile
+\[
+d = (d_e,d_{-e}) \in \mathcal{D}_e \times \mathcal{D}_{-e},
+\]
+and the induced follower subgame over the continuous tactical parameters $c_{-e}$ conditioned on the ego continuous decision $c_e$. Suppose that:
+(i) for each follower vehicle $j$, the continuous feasible set $\mathcal{C}_j(d_j)$ is nonempty, compact, and convex;
+(ii) for any fixed $(z_i,d_i,d_{-i},c_{-i})$, the utility $U_i$ is continuous and strictly concave with respect to $c_i$;
+(iii) the follower continuous constraints satisfy a regularity condition such as Slater's condition;
+(iv) the follower-layer pseudo-gradient mapping $G_c(c_{-e};d,c_e)$ of the conditioned continuous subgame is strongly monotone.
+Then, for a given leader hybrid action $a_e=(d_e,c_e)$, the follower-layer conditioned continuous equilibrium exists and is unique. Moreover, if
+\[
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^{\star}(d,c_e))
+\right)
+\]
+is continuous in $a_e$ and the discrete tactical candidate set is finite, then the leader problem \eqref{eq:final_safe_leader_problem} admits at least one maximizer over the admissible hybrid action space.
+}
+
+\textit{Remark 1.}
+The above proposition is established for the conditioned continuous subgame under fixed discrete tactical candidates, rather than for the original hybrid tactical game directly. In practical implementation, the exact equilibrium may be approximated by finite-step IBR, robust-response evaluation, or learning-based value approximation, while the overall hybrid decision is obtained by evaluating admissible discrete tactical candidates together with their associated continuous responses.
+
+
+
+\subsection{Summary of the Game-Theoretic Tactical Layer}
+\label{subsec:tactical_summary}
+
+The proposed tactical decision layer is summarized by
+\begin{equation}
+\boxed{
+a_e^\star
+=
+\arg\max_{a_e=(d_e,c_e)\in\mathcal{A}_e^{\mathrm{safe}}(o_k)}
+\left[
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^{\mathrm{IBR}\star}(d,c_e))
+\right)
++
+\lambda_{\mathrm{rec}}
+\Phi_{\mathrm{rec},e}
+\left(
+x_e^N,\,
+\mathcal{R}_e(X_k;\vartheta_e)
+\right)
+\right]
+}
+\label{eq:compact_tactical_law}
+\end{equation}
+where
+\begin{equation}
+c_{-e}^{\mathrm{IBR}\star}(d,c_e)
+=
+\lim_{\nu\to\infty}
+\mathrm{BR}_{-e}^{(\nu)}(d,c_e),
+\label{eq:compact_ibr}
+\end{equation}
+where the follower discrete tactical candidates $d_{-e}$ are fixed within each conditioned continuous subgame, and only the continuous follower response is iteratively updated in the IBR process.
+and
+\begin{equation}
+\vartheta_e = \mathcal{T}(a_e,o_e),
+\qquad
+\mathcal{R}_e(X_k;\vartheta_e)
+=
+\arg\min_{\xi_e\in\mathcal{F}_e(X_k;\vartheta_e)}
+J_e^{\mathrm{L}}(\xi_e;X_k,\vartheta_e).
+\label{eq:compact_lower_response}
+\end{equation}
+
+\section{Theory-Guided Reinforcement Learning Approximation of the Tactical Equilibrium}
+\label{sec:theory_guided_rl}
+
+The game-theoretic tactical layer developed in Section~\ref{sec:method_game} provides a principled characterization of the desired racing behavior. However, computing the exact Stackelberg--IBR tactical equilibrium online is computationally expensive, especially in dense multi-vehicle racing scenarios where each tactical decision is coupled with the low-level local trajectory optimization. To enable real-time deployment, we approximate the equilibrium policy by a theory-guided reinforcement learning framework. Specifically, the tactical policy is learned by hybrid-action proximal policy optimization, while being regularized and constrained by the game-theoretic quantities derived in the previous section.
+
+\subsection{Approximate Tactical Equilibrium Policy}
+\label{subsec:approx_equilibrium_policy}
+
+Recall that the ego tactical decision is defined by
+\begin{equation}
+a_e^\star
+=
+\arg\max_{a_e=(d_e,c_e)\in\mathcal{A}_e^{\mathrm{safe}}(o_k)}
+\left[
+U_e\!\left(
+z_e,\,
+(d_e,c_e),\,
+(d_{-e},c_{-e}^{\mathrm{IBR}\star}(d,c_e))
+\right)
++
+\lambda_{\mathrm{rec}}
+\Phi_{\mathrm{rec},e}
+\left(
+x_e^N,\,
+\mathcal{R}_e(X_k;\vartheta_e)
+\right)
+\right].
+\label{eq:exact_tactical_equilibrium}
+\end{equation}
+
+To avoid solving \eqref{eq:exact_tactical_equilibrium} explicitly at every planning cycle, we introduce a parameterized policy
+\begin{equation}
+\pi_\theta(a_e\mid o_k),
+\label{eq:policy_def}
+\end{equation}
+where $o_k$ is the tactical observation at time step $k$ and $\theta$ denotes the policy parameters. The goal of the learning process is to approximate the equilibrium-inducing decision rule
+\begin{equation}
+\pi_{\mathrm{eq}}^\star(o_k)
+\approx
+\arg\max_{a_e\in\mathcal{A}_e^{\mathrm{safe}}(o_k)}
+\underline{\mathcal{V}}_e(a_e\mid o_k).
+\label{eq:equilibrium_policy_approx}
+\end{equation}
+
+\subsection{Tactical Observation Space}
+\label{subsec:observation_space}
+
+The observation is constructed to preserve the tactical game structure and planner-related information. Let
+\begin{equation}
+o_k =
+\mathrm{col}
+\left(
+o_k^{\mathrm{ego}},
+o_k^{\mathrm{opp}},
+o_k^{\mathrm{track}},
+o_k^{\mathrm{plan}}
+\right),
+\label{eq:observation_vector}
+\end{equation}
+where the components are defined as follows.
+
+\subsubsection{Ego Tactical State}
+
+\begin{equation}
+o_k^{\mathrm{ego}}
+=
+\begin{bmatrix}
+s_e^k,\;
+n_e^k,\;
+v_e^k,\;
+\chi_e^k,\;
+a_{x,e}^k,\;
+a_{y,e}^k
+\end{bmatrix}^{\!\top}.
+\label{eq:ego_observation}
+\end{equation}
+
+\subsubsection{Opponent Relative Tactical State}
+
+\begin{equation}
+o_k^{\mathrm{opp}}
+=
+\mathrm{col}
+\left(
+z_{ej_1}^k,\;
+z_{ej_2}^k,\;
+\dots
+\right),
+\label{eq:opponent_observation}
+\end{equation}
+with
+\begin{equation}
+z_{ej}^k=
+\begin{bmatrix}
+\Delta s_{ej}^k,\;
+\Delta n_{ej}^k,\;
+\Delta v_{ej}^k,\;
+\Delta \chi_{ej}^k
+\end{bmatrix}^{\!\top}.
+\label{eq:relative_obs_repeat}
+\end{equation}
+
+\subsubsection{Track Geometry Context}
+
+\begin{equation}
+o_k^{\mathrm{track}}
+=
+\begin{bmatrix}
+\kappa_k,\;
+\bar\kappa_k,\;
+d_{\mathrm{apex}}^k,\;
+w_{\mathrm{left}}^k,\;
+w_{\mathrm{right}}^k
+\end{bmatrix}^{\!\top},
+\label{eq:track_observation}
+\end{equation}
+where $\kappa_k$ is the local curvature, $\bar\kappa_k$ is an aggregated future curvature descriptor, $d_{\mathrm{apex}}^k$ is the distance to the next dominant corner feature, and $w_{\mathrm{left}}^k$, $w_{\mathrm{right}}^k$ denote the local track widths.
+
+\subsubsection{Planning Health and Tactical Memory}
+
+\begin{equation}
+o_k^{\mathrm{plan}}
+=
+\begin{bmatrix}
+\mathrm{valid}_{k-1},\;
+\|\epsilon_{k-1}^\star\|_1,\;
+W_{k-1}^{N},\;
+M_{k-1}^{N},\;
+\tau_k^{\mathrm{intent}}
+\end{bmatrix}^{\!\top},
+\label{eq:planner_observation}
+\end{equation}
+where $\mathrm{valid}_{k-1}$ indicates whether the previous low-level optimization was feasible, $\|\epsilon_{k-1}^\star\|_1$ is the slack usage, $W_{k-1}^{N}$ and $M_{k-1}^{N}$ are the previous terminal corridor width and centered margin, and $\tau_k^{\mathrm{intent}}$ denotes the current tactical commitment duration.
+
+\subsection{Hybrid Tactical Action Space}
+\label{subsec:hybrid_action_space}
+
+
+The tactical command contains both discrete and continuous components. Accordingly, the action is defined as a hybrid tactical action
+\begin{equation}
+a_k =
+\left(
+a_k^{\mathrm{d}},\, a_k^{\mathrm{c}}
+\right),
+\label{eq:hybrid_action}
+\end{equation}
+where $a_k^{\mathrm{d}}$ is the discrete tactical decision and $a_k^{\mathrm{c}}$ is the continuous tactical parameter vector. This hybrid decomposition is consistent with the game-theoretic formulation in Section~\ref{sec:method_game}, where analytical regularity results are established for the conditioned continuous subgame under fixed discrete tactical candidates.
+
+
+
+
+\subsubsection{Discrete Tactical Decision}
+
+\begin{equation}
+a_k^{\mathrm{d}}
+=
+\left(
+m_k,\ell_k
+\right),
+\label{eq:discrete_action}
+\end{equation}
+where
+\begin{equation}
+m_k \in \mathcal{M}
+=
+\left\{
+\mathrm{follow},\;
+\mathrm{attack},\;
+\mathrm{defend},\;
+\mathrm{recover}
+\right\},
+\label{eq:tactical_mode_set}
+\end{equation}
+and
+\begin{equation}
+\ell_k \in \mathcal{L}
+=
+\left\{
+\mathrm{left},\;
+\mathrm{right},\;
+\mathrm{center}
+\right\}.
+\label{eq:lateral_intent_set}
+\end{equation}
+
+\subsubsection{Continuous Tactical Parameters}
+
+\begin{equation}
+a_k^{\mathrm{c}}
+=
+\begin{bmatrix}
+\alpha_k,\;
+\rho_k
+\end{bmatrix},
+\label{eq:continuous_action}
+\end{equation}
+where $\alpha_k\in[0,1]$ denotes the aggressiveness level, and $\rho_k\in\mathbb{R}^{p}$ denotes a terminal-preference vector used to parameterize the lower-level planner, e.g.,
+\begin{equation}
+\rho_k=
+\begin{bmatrix}
+n_{\mathrm{ref}}^{N},\;
+\chi_{\mathrm{ref}}^{N},\;
+v_{\mathrm{ref}}^{N},\;
+b_{\mathrm{corr}}
+\end{bmatrix}^{\!\top}.
+\label{eq:terminal_preference_vector}
+\end{equation}
+
+Thus, the tactical policy outputs
+\begin{equation}
+\pi_\theta(a_k\mid o_k)
+=
+\pi_\theta\!\left(a_k^{\mathrm{d}},a_k^{\mathrm{c}}\mid o_k\right).
+\label{eq:joint_policy_factorization_general}
+\end{equation}
+
+\subsection{Hybrid PPO Policy Parameterization}
+\label{subsec:hybrid_ppo}
+
+To handle the hybrid action space, we adopt a hybrid proximal policy optimization architecture. The policy is factorized as
+\begin{equation}
+\pi_\theta(a_k\mid o_k)
+=
+\pi_\theta^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)
+\,
+\pi_\theta^{\mathrm{c}}(a_k^{\mathrm{c}}\mid a_k^{\mathrm{d}}, o_k).
+\label{eq:joint_policy_factorization}
+\end{equation}
+
+The discrete branch outputs a categorical distribution over tactical mode--side combinations:
+\begin{equation}
+\pi_\theta^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)
+=
+\mathrm{Cat}\left(p_\theta(o_k)\right),
+\label{eq:categorical_policy}
+\end{equation}
+while the continuous branch outputs the parameters of a Gaussian distribution conditioned on the sampled discrete tactical decision:
+\begin{equation}
+\pi_\theta^{\mathrm{c}}(a_k^{\mathrm{c}}\mid a_k^{\mathrm{d}},o_k)
+=
+\mathcal{N}\!\left(
+\mu_\theta(a_k^{\mathrm{d}},o_k),
+\Sigma_\theta(a_k^{\mathrm{d}},o_k)
+\right).
+\label{eq:gaussian_policy}
+\end{equation}
+
+A critic network $V_\phi(o_k)$ is used to estimate the state value:
+\begin{equation}
+V_\phi(o_k)
+\approx
+\mathbb{E}_{\pi_\theta}
+\left[
+\sum_{t=k}^{T-1}\gamma^{t-k}r_t
+\;\middle|\;
+o_k
+\right].
+\label{eq:value_function}
+\end{equation}
+
+The standard clipped PPO surrogate objective is
+\begin{equation}
+\mathcal{L}_{\mathrm{PPO}}(\theta)
+=
+\mathbb{E}_k
+\left[
+\min\left(
+r_k(\theta)\hat A_k,\;
+\mathrm{clip}\!\left(r_k(\theta),1-\epsilon,1+\epsilon\right)\hat A_k
+\right)
+\right],
+\label{eq:ppo_surrogate}
+\end{equation}
+where
+\begin{equation}
+r_k(\theta)
+=
+\frac{
+\pi_\theta(a_k\mid o_k)
+}{
+\pi_{\theta_{\mathrm{old}}}(a_k\mid o_k)
+},
+\label{eq:policy_ratio}
+\end{equation}
+and $\hat A_k$ is the generalized advantage estimate.
+
+The value loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{V}}(\phi)
+=
+\mathbb{E}_k
+\left[
+\left(
+V_\phi(o_k)-\hat R_k
+\right)^2
+\right],
+\label{eq:value_loss}
+\end{equation}
+where $\hat R_k$ is the empirical return target.
+
+\subsection{Theory-Guided Reward Design}
+\label{subsec:theory_guided_reward}
+
+Instead of relying on sparse overtaking rewards alone, the tactical reward is directly constructed from the game-theoretic quantities derived in Section~\ref{sec:method_game}. The instantaneous reward is defined as
+\begin{equation}
+r_k
+=
+\beta_p r_k^{\mathrm{prog}}
++
+\beta_g r_k^{\mathrm{game}}
++
+\beta_s r_k^{\mathrm{safe}}
++
+\beta_r r_k^{\mathrm{rec}}
++
+\beta_c r_k^{\mathrm{ctrl}}.
+\label{eq:total_reward}
+\end{equation}
+
+The progress reward is
+\begin{equation}
+r_k^{\mathrm{prog}} = s_e^{k+1}-s_e^k.
+\label{eq:progress_reward}
+\end{equation}
+
+The game interaction reward is
+\begin{equation}
+r_k^{\mathrm{game}}
+=
+U_e^{\mathrm{race}}
+\left(
+z_k,\,
+a_k,\,
+\hat a_{-e,k}^{\mathrm{IBR}}
+\right),
+\label{eq:game_reward}
+\end{equation}
+where $\hat a_{-e,k}^{\mathrm{IBR}}$ is the estimated follower-layer response obtained from finite-step IBR or its robust approximation.
+
+The safety reward is defined as
+\begin{equation}
+r_k^{\mathrm{safe}}
+=
+U_e^{\mathrm{safe}}
+\left(
+z_k,\,
+a_k,\,
+\hat a_{-e,k}^{\mathrm{IBR}}
+\right).
+\label{eq:safety_reward}
+\end{equation}
+
+The recursive-plannability reward is
+\begin{equation}
+r_k^{\mathrm{rec}}
+=
+\Phi_{\mathrm{rec},e}
+\left(
+x_e^{N},\,
+\mathcal{R}_e(X_k;\vartheta_k)
+\right),
+\label{eq:recursive_reward}
+\end{equation}
+where $\vartheta_k=\mathcal{T}(a_k,o_k)$.
+
+The tactical smoothness reward is
+\begin{equation}
+r_k^{\mathrm{ctrl}}
+=
+U_e^{\mathrm{ctrl}}(a_k,a_{k-1}).
+\label{eq:control_reward}
+\end{equation}
+
+
+
+\subsection{Theory-Prior Regularization}
+\label{subsec:theory_prior_regularization}
+
+To further approximate the Stackelberg tactical equilibrium, we introduce a theory-derived prior policy. Because the tactical action is hybrid, the prior is factorized into a discrete tactical prior and a conditioned continuous prior:
+\begin{equation}
+\pi_{\mathrm{th}}(a_k\mid o_k)
+=
+\pi_{\mathrm{th}}^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)\,
+\pi_{\mathrm{th}}^{\mathrm{c}}(a_k^{\mathrm{c}}\mid a_k^{\mathrm{d}},o_k).
+\label{eq:theory_prior}
+\end{equation}
+
+
+For the discrete tactical branch, let the game-theoretic value of a discrete candidate be
+\begin{equation}
+\mathcal{G}_{\mathrm{d}}(o_k,a_k^{\mathrm{d}})
+=
+\underline{\mathcal{V}}_e(a_k^{\mathrm{d}}\mid o_k),
+\label{eq:game_value_function}
+\end{equation}
+where the induced discrete tactical value is defined by
+\begin{equation}
+\underline{\mathcal{V}}_e(a_k^{\mathrm{d}}\mid o_k)
+:=
+\underline{\mathcal{V}}_e\!\left(
+\left(a_k^{\mathrm{d}},c_{\mathrm{th}}^\star(a_k^{\mathrm{d}},o_k)\right)
+\middle| o_k
+\right),
+\label{eq:discrete_induced_value}
+\end{equation}
+that is, the robust Stackelberg tactical value obtained by pairing the discrete tactical candidate with the corresponding locally optimal continuous tactical parameter from the conditioned continuous subgame.
+
+
+Using this quantity, we define the soft game-theoretic prior over the discrete tactical candidates as
+\begin{equation}
+\pi_{\mathrm{th}}^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)
+=
+\frac{
+\exp\!\left(\mathcal{G}_{\mathrm{d}}(o_k,a_k^{\mathrm{d}})/\tau_d\right)
+}{
+\sum\limits_{\bar a^{\mathrm{d}} \in \mathcal{D}_e^{\mathrm{safe}}(o_k)}
+\exp\!\left(\mathcal{G}_{\mathrm{d}}(o_k,\bar a^{\mathrm{d}})/\tau_d\right)
+},
+\label{eq:discrete_theory_prior}
+\end{equation}
+where $\tau_d>0$ is a temperature parameter.
+
+For the continuous tactical branch, let
+\begin{equation}
+c_{\mathrm{th}}^{\star}(a_k^{\mathrm{d}},o_k)
+\label{eq:continuous_theory_target}
+\end{equation}
+denote the locally optimal continuous tactical parameter obtained from the conditioned continuous subgame under the discrete tactical candidate $a_k^{\mathrm{d}}$. Then the conditioned continuous prior is defined as
+\begin{equation}
+\pi_{\mathrm{th}}^{\mathrm{c}}(a_k^{\mathrm{c}}\mid a_k^{\mathrm{d}},o_k)
+\propto
+\exp\!\left(
+-\frac{1}{2}
+\left(a_k^{\mathrm{c}}-c_{\mathrm{th}}^{\star}(a_k^{\mathrm{d}},o_k)\right)^\top
+\Sigma_{\mathrm{th}}^{-1}
+\left(a_k^{\mathrm{c}}-c_{\mathrm{th}}^{\star}(a_k^{\mathrm{d}},o_k)\right)
+\right)
+\mathbf{1}_{a_k^{\mathrm{c}}\in\mathcal{C}_e(a_k^{\mathrm{d}})},
+\label{eq:continuous_theory_prior}
+\end{equation}
+where $\Sigma_{\mathrm{th}} \succ 0$ is a covariance matrix.
+
+Accordingly, the learned tactical policy is regularized toward this factorized prior by
+\begin{equation}
+\mathcal{L}_{\mathrm{prior}}(\theta)
+=
+\mathbb{E}_k
+\left[
+\lambda_d
+D_{\mathrm{KL}}
+\big(
+\pi_\theta^{\mathrm{d}}(\cdot\mid o_k)
+\;\|\;
+\pi_{\mathrm{th}}^{\mathrm{d}}(\cdot\mid o_k)
+\big)
++
+\lambda_c
+\left\|
+\mu_\theta^{\mathrm{c}}(a_k^{\mathrm{d}},o_k)-c_{\mathrm{th}}^{\star}(a_k^{\mathrm{d}},o_k)
+\right\|_{W_c}^{2}
+\right],
+\label{eq:prior_regularization}
+\end{equation}
+where $\mu_\theta^{\mathrm{c}}(a_k^{\mathrm{d}},o_k)$ denotes the mean of the learned continuous tactical policy conditioned on the discrete tactical decision, and $W_c \succeq 0$ is a weighting matrix.
+
+
+
+\subsection{Safe Action Masking}
+\label{subsec:safe_action_masking}
+
+To guarantee tactical safety during exploration and execution, we employ an online approximation of the response-set-based safe tactical action set defined in Section~\ref{sec:method_game}. Specifically, the opponent response set is approximated by a singleton IBR-style prediction,
+\begin{equation}
+\mathfrak{B}_j(o_k,a)
+\approx
+\left\{
+\hat a_j^{\mathrm{IBR}}(o_k,a)
+\right\},
+\label{eq:singleton_safe_response}
+\end{equation}
+which yields the tractable approximate safe tactical set
+\begin{equation}
+\widehat{\mathcal{A}}_e^{\mathrm{safe}}(o_k)
+=
+\left\{
+a \in \mathcal{A}_e
+\mid
+\mathcal{B}_{ej}\!\left(z_{ej},a,\hat a_j^{\mathrm{IBR}}(o_k,a)\right)\ge 0,\;
+\forall j\in\mathcal{N}_{-e}
+\right\}.
+\label{eq:safe_action_mask}
+\end{equation}
+Here, $\mathcal{B}_{ej}$ is the barrier-based tactical safety constraint defined in Section~\ref{sec:method_game}.
+
+
+Since the tactical action is hybrid, safe masking is applied primarily to the discrete tactical branch. We define the safe discrete tactical candidate set as
+\begin{equation}
+\mathcal{D}_e^{\mathrm{safe}}(o_k)
+:=
+\left\{
+a_k^{\mathrm{d}}\in\mathcal{D}_e
+\;\middle|\;
+\exists a_k^{\mathrm{c}}\in\mathcal{C}_e(a_k^{\mathrm{d}})
+\text{ such that }
+(a_k^{\mathrm{d}},a_k^{\mathrm{c}})
+\in
+\widehat{\mathcal{A}}_e^{\mathrm{safe}}(o_k)
+\right\}.
+\label{eq:safe_discrete_set}
+\end{equation}
+Then the masked discrete policy is defined as
+\begin{equation}
+\tilde \pi_\theta^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)
+=
+\frac{
+\pi_\theta^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)\,
+\mathbf{1}_{a_k^{\mathrm{d}}\in\mathcal{D}_e^{\mathrm{safe}}(o_k)}
+}{
+\sum_{a^{\mathrm{d}}}
+\pi_\theta^{\mathrm{d}}(a^{\mathrm{d}}\mid o_k)\,
+\mathbf{1}_{a^{\mathrm{d}}\in\mathcal{D}_e^{\mathrm{safe}}(o_k)}
+}.
+\label{eq:masked_policy}
+\end{equation}
+The continuous tactical parameters are kept feasible through bounded parameterization and projection onto the admissible continuous set. Accordingly, the complete masked hybrid policy is defined as
+\begin{equation}
+\tilde\pi_\theta(a_k\mid o_k)
+:=
+\tilde \pi_\theta^{\mathrm{d}}(a_k^{\mathrm{d}}\mid o_k)\,
+\pi_\theta^{\mathrm{c}}(a_k^{\mathrm{c}}\mid a_k^{\mathrm{d}},o_k),
+\label{eq:masked_hybrid_policy}
+\end{equation}
+with the sampled continuous tactical parameter projected onto $\mathcal{C}_e(a_k^{\mathrm{d}})$ before being passed to the lower-level planner.
+Therefore, $\mathcal{D}_e^{\mathrm{safe}}(o_k)$ should be interpreted as a feasibility-preserving candidate set for the discrete branch, while the final safety and admissibility of the full hybrid action are enforced through continuous-parameter projection and the downstream barrier-consistent planner interface.
+
+
+
+\subsection{Auxiliary Game-Value Approximation}
+\label{subsec:auxiliary_head}
+
+In addition to the standard critic, we introduce an auxiliary game-value head
+\begin{equation}
+\hat{\mathcal{G}}_\psi(o_k,a_k)
+\approx
+\underline{\mathcal{V}}_e(a_k\mid o_k),
+\label{eq:auxiliary_head}
+\end{equation}
+which learns to approximate the robust Stackelberg tactical value.
+
+The corresponding auxiliary regression loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{game}}(\psi)
+=
+\mathbb{E}_{k}
+\left[
+\left(
+\hat{\mathcal{G}}_\psi(o_k,a_k)-\underline{\mathcal{V}}_e(a_k\mid o_k)
+\right)^2
+\right].
+\label{eq:game_head_loss}
+\end{equation}
+
+
+\subsection{Overall Optimization Objective}
+\label{subsec:overall_objective}
+
+Combining the PPO objective, the value loss, the theory-prior regularization, and the auxiliary game-value loss, the final optimization problem is
+\begin{equation}
+\max_{\theta,\phi,\psi}
+\quad
+\mathcal{L}_{\mathrm{PPO}}(\theta)
+-
+\lambda_V \mathcal{L}_{\mathrm{V}}(\phi)
+-
+\lambda_{\mathrm{KL}} \mathcal{L}_{\mathrm{prior}}(\theta)
+-
+\lambda_{\mathrm{game}} \mathcal{L}_{\mathrm{game}}(\psi)
++
+\lambda_H \mathcal{H}\!\left(\pi_\theta\right),
+\label{eq:overall_training_objective}
+\end{equation}
+where $\mathcal{H}(\pi_\theta)$ denotes the policy entropy regularization term.
+
+Equivalently, the learning problem can be interpreted as
+\begin{equation}
+\begin{aligned}
+\max_{\pi_\theta}\quad
+&
+\mathbb{E}_{\tilde \pi_\theta}
+\left[
+\sum_{k=0}^{T-1}\gamma^k
+\left(
+\beta_p r_k^{\mathrm{prog}}
++
+\beta_g r_k^{\mathrm{game}}
++
+\beta_s r_k^{\mathrm{safe}}
++
+\beta_r r_k^{\mathrm{rec}}
++
+\beta_c r_k^{\mathrm{ctrl}}
+\right)
+\right]
+\\
+\text{s.t.}\quad
+&
+a_k \sim \tilde\pi_\theta(\cdot\mid o_k),
+\\
+&
+\hat a_{-e,k}^{\mathrm{IBR}}
+=
+\mathrm{IBR}_{\mathrm{approx}}(o_k,a_k),
+\\
+&
+\vartheta_k = \mathcal{T}(a_k,o_k),
+\\
+&
+\xi_e^\star
+=
+\mathcal{R}_e(X_k;\vartheta_k),
+\\
+&
+D_{\mathrm{KL}}
+\left(
+\pi_\theta^{\mathrm d}(\cdot\mid o_k)
+\;\|\;
+\pi_{\mathrm{th}}^{\mathrm d}(\cdot\mid o_k)
+\right)
+\le \varepsilon_d,
+\\
+&
+\left\|
+\mu_\theta^{\mathrm c}(a_k^{\mathrm d},o_k)
+-
+c_{\mathrm{th}}^\star(a_k^{\mathrm d},o_k)
+\right\|_{W_c}^{2}
+\le \varepsilon_c.
+\end{aligned}
+\label{eq:constrained_rl_formulation}
+\end{equation}
+
+\subsection{Integration with the Low-Level Planner}
+\label{subsec:integration_low_level}
+
+Once a tactical action $a_k=(a_k^{\mathrm{d}},a_k^{\mathrm{c}})$ is sampled, it is converted into the planner guidance variable $\vartheta_k=\mathcal{T}(a_k,o_k)$. Therefore, the low-level planner solves
+\begin{equation}
+\xi_e^\star
+=
+\mathcal{R}_e(X_k;\vartheta_k),
+\label{eq:planner_under_policy}
+\end{equation}
+and the resulting terminal state feeds back into the recursive-plannability reward \eqref{eq:recursive_reward}. This closes the loop between the tactical policy and the local trajectory optimizer.
+
+\subsection{Interpretation}
+\label{subsec:rl_interpretation}
+
+The proposed theory-guided hybrid PPO does not learn the tactical policy from scratch in an unconstrained manner. Instead, it approximates the game-theoretic tactical equilibrium through four complementary mechanisms:
+\begin{enumerate}
+    \item the reward is constructed from the game-theoretic utility terms;
+    \item unsafe tactical actions are masked out using the barrier-based feasible set;
+    \item the policy is regularized toward a Stackelberg--IBR prior distribution;
+    \item an auxiliary head learns the robust tactical value function.
+\end{enumerate}
+
+As a result, the learned decision layer inherits the interpretability and structural consistency of the game-theoretic model, while retaining the adaptability and computational efficiency of deep reinforcement learning.
+
+\section{Tactically Parameterized Local Trajectory Planning}
+\label{sec:tactical_parameterized_local_planning}
+
+This section explains how the high-level tactical action derived from the Stackelberg--IBR game and approximated by the theory-guided hybrid PPO is injected into the low-level local trajectory planner, and how the planner generates the executable racing trajectory under such tactical guidance. In the proposed framework, the tactical layer does not directly output a geometric path. Instead, it provides a compact tactical command that parameterizes the low-level optimal control problem. The local planner then computes a dynamically feasible short-horizon trajectory consistent with the selected tactical intention.
+
+\subsection{From Tactical Equilibrium Action to Planner Guidance Variables}
+\label{subsec:tactical_guidance_variables}
+
+The high-level policy outputs the hybrid tactical action
+\begin{equation}
+a_k =
+\left(
+m_k,\;
+\ell_k,\;
+\alpha_k,\;
+\rho_k
+\right),
+\label{eq:high_level_tactical_action_again}
+\end{equation}
+where $m_k$ denotes the tactical mode, $\ell_k$ denotes the lateral intention, $\alpha_k$ denotes the aggressiveness level, and $\rho_k$ denotes the terminal tactical preference.
+
+For direct use by the low-level local planner, the action $a_k$ is transformed into a structured tactical guidance variable
+\begin{equation}
+\vartheta_k = \mathcal{T}(a_k,o_k),
+\label{eq:tactical_guidance_mapping}
+\end{equation}
+where $\mathcal{T}(\cdot)$ is the tactical-to-planner mapping and $o_k$ is the tactical observation defined in Section~\ref{sec:theory_guided_rl}. We define
+\begin{equation}
+\vartheta_k
+=
+\left(
+\Theta_k^{\mathrm{int}},
+\Theta_k^{\mathrm{corr}},
+\Theta_k^{\mathrm{term}},
+\Theta_k^{\mathrm{cost}}
+\right),
+\label{eq:tactical_guidance_decomposition}
+\end{equation}
+where:
+\begin{itemize}
+    \item $\Theta_k^{\mathrm{int}}$ is the interaction-guidance component;
+    \item $\Theta_k^{\mathrm{corr}}$ is the corridor-shaping component;
+    \item $\Theta_k^{\mathrm{term}}$ is the terminal-state guidance component;
+    \item $\Theta_k^{\mathrm{cost}}$ is the optimization-weight modulation component.
+\end{itemize}
+
+\subsection{Advanced Tactical Interface for Local Planning}
+\label{subsec:advanced_tactical_interface}
+
+To achieve a strong coupling between the game-theoretic decision layer and the local planner, we introduce the following planner guidance interface:
+\begin{equation}
+\vartheta_k
+=
+\left(
+\lambda_k^{\mathrm{safe}},
+\eta_k^{\mathrm{side}},
+c_k^{\mathrm{corr}}(s),
+\Gamma_k^{\mathrm{term}},
+W_k^{\mathrm{term}},
+\Lambda_k^{\mathrm{cost}}
+\right).
+\label{eq:advanced_interface}
+\end{equation}
+
+Here,
+\begin{itemize}
+    \item $\lambda_k^{\mathrm{safe}}$ is the tactical interaction-risk budget;
+    \item $\eta_k^{\mathrm{side}}$ is the passing-side homotopy variable;
+    \item $c_k^{\mathrm{corr}}(s)$ is the tactical corridor reference field;
+    \item $\Gamma_k^{\mathrm{term}}$ is the terminal tactical target set;
+    \item $W_k^{\mathrm{term}}$ is the terminal sustainability weight vector;
+    \item $\Lambda_k^{\mathrm{cost}}$ is the cost modulation matrix of the local OCP.
+\end{itemize}
+
+\subsection{Instantiated Tactical Guidance Parameterization}
+\label{subsec:instantiated_tactical_guidance}
+
+To make the tactical-to-planner interface directly implementable, we further instantiate each component of \eqref{eq:advanced_interface}.
+
+\subsubsection{Interaction Risk Budget}
+
+The interaction risk budget is parameterized by the aggressiveness variable $\alpha_k\in[0,1]$. We define
+\begin{equation}
+\lambda_k^{\mathrm{safe}} = 1-\bar\lambda_\alpha \alpha_k,
+\qquad
+\bar\lambda_\alpha \in (0,1),
+\label{eq:safe_budget_affine}
+\end{equation}
+and use it to scale the nominal longitudinal and lateral safety margins:
+\begin{equation}
+d_{s,\mathrm{eff}}^k
+=
+\lambda_k^{\mathrm{safe}} d_s^{\mathrm{nom}},
+\qquad
+d_{n,\mathrm{eff}}^k
+=
+\lambda_k^{\mathrm{safe}} d_n^{\mathrm{nom}}.
+\label{eq:safe_budget_scaled}
+\end{equation}
+
+\subsubsection{Passing-Side Homotopy Variable}
+
+The side-intention variable is defined as a continuous homotopy scalar
+\begin{equation}
+\eta_k^{\mathrm{side}} \in [-1,1],
+\label{eq:eta_side_range}
+\end{equation}
+with the basic form
+\begin{equation}
+\eta_k^{\mathrm{side}}
+=
+\begin{cases}
++1, & \ell_k=\mathrm{left},\\
+-1, & \ell_k=\mathrm{right},\\
+0, & \ell_k=\mathrm{center},
+\end{cases}
+\label{eq:eta_side_discrete}
+\end{equation}
+and the smoothed form
+\begin{equation}
+\eta_k^{\mathrm{side}}
+=
+\mathrm{sat}_{[-1,1]}
+\left(
+\eta_k^{0}
++
+\beta_\ell \ell_k
++
+\beta_n \tanh\!\frac{\Delta n_{ej^\star}^k}{\varepsilon_n}
+\right),
+\label{eq:eta_side_smooth}
+\end{equation}
+where $j^\star$ denotes the most relevant opponent.
+
+\subsubsection{Tactical Corridor Reference Field}
+
+Let the tactically feasible lateral corridor at longitudinal coordinate $s$ be
+\begin{equation}
+\mathcal{C}_k(s)
+=
+\left[
+n_{\min}^k(s),\;
+n_{\max}^k(s)
+\right].
+\label{eq:tactical_corridor_interval_repeated}
+\end{equation}
+Its center and half-width are
+\begin{equation}
+n_{\mathrm{ctr}}^k(s)
+=
+\frac{n_{\min}^k(s)+n_{\max}^k(s)}{2},
+\qquad
+w_{\mathrm{ctr}}^k(s)
+=
+\frac{n_{\max}^k(s)-n_{\min}^k(s)}{2}.
+\label{eq:corridor_center_halfwidth}
+\end{equation}
+
+We define the corridor reference field as
+\begin{equation}
+c_k^{\mathrm{corr}}(s)
+=
+n_{\mathrm{ctr}}^k(s)
++
+\zeta_k(s)\,w_{\mathrm{ctr}}^k(s),
+\label{eq:corridor_reference_field_instantiated}
+\end{equation}
+where
+\begin{equation}
+\zeta_k(s)
+=
+\eta_k^{\mathrm{side}}
+\,
+\gamma_m
+\,
+\gamma_\kappa(s),
+\label{eq:zeta_definition}
+\end{equation}
+with
+\begin{equation}
+\gamma_m=
+\begin{cases}
+0, & m_k=\mathrm{follow},\\
+\gamma_{\mathrm{att}}, & m_k=\mathrm{attack},\\
+\gamma_{\mathrm{def}}, & m_k=\mathrm{defend},\\
+0, & m_k=\mathrm{recover},
+\end{cases}
+\qquad
+0 \le \gamma_{\mathrm{att}},\gamma_{\mathrm{def}} \le 1,
+\label{eq:mode_dependent_gamma}
+\end{equation}
+and
+\begin{equation}
+\gamma_\kappa(s)
+=
+\exp\!\left(
+-\beta_\kappa |\kappa(s)|
+\right).
+\label{eq:curvature_modulation}
+\end{equation}
+
+\subsubsection{Terminal Tactical Target Set}
+
+The upper layer provides a terminal tactical target set
+\begin{equation}
+\Gamma_k^{\mathrm{term}}
+=
+\left\{
+x_N \in \mathbb{R}^{n_x}
+\mid
+\underline x_k^{\mathrm{term}}
+\le x_N \le
+\bar x_k^{\mathrm{term}}
+\right\},
+\label{eq:terminal_target_set_repeated}
+\end{equation}
+with
+\begin{equation}
+\underline x_k^{\mathrm{term}}
+=
+\begin{bmatrix}
+\underline s_k^{N}\\
+\underline n_k^{N}\\
+\underline V_k^{N}\\
+\underline \chi_k^{N}
+\end{bmatrix},
+\qquad
+\bar x_k^{\mathrm{term}}
+=
+\begin{bmatrix}
+\bar s_k^{N}\\
+\bar n_k^{N}\\
+\bar V_k^{N}\\
+\bar \chi_k^{N}
+\end{bmatrix}.
+\label{eq:terminal_bounds}
+\end{equation}
+
+A representative terminal reference is extracted as
+\begin{equation}
+x_{N,\mathrm{ref}}^k
+=
+\frac{
+\underline x_k^{\mathrm{term}}
++
+\bar x_k^{\mathrm{term}}
+}{2}.
+\label{eq:terminal_reference_center}
+\end{equation}
+
+A compact implementable form is
+\begin{equation}
+n_{N,\mathrm{ref}}^k
+=
+c_k^{\mathrm{corr}}(s_N)
++
+\delta_k^{\mathrm{term}},
+\label{eq:terminal_n_reference}
+\end{equation}
+where $\delta_k^{\mathrm{term}}$ is a mode-dependent terminal offset, and
+\begin{equation}
+\chi_{N,\mathrm{ref}}^k = 0,
+\qquad
+V_{N,\mathrm{ref}}^k
+=
+V_{\mathrm{nom}}^N + \Delta V_k^{\mathrm{term}}.
+\label{eq:terminal_chi_v_reference}
+\end{equation}
+
+\subsubsection{Terminal Sustainability Weights}
+
+The terminal sustainability weights are defined as
+\begin{equation}
+W_k^{\mathrm{term}}
+=
+\left(
+q_{N,n}^k,\;
+q_{N,\chi}^k,\;
+q_{N,V}^k,\;
+\omega_{W}^k,\;
+\omega_{M}^k,\;
+\omega_{\epsilon}^k
+\right),
+\label{eq:terminal_weight_vector}
+\end{equation}
+with
+\begin{equation}
+q_{N,n}^k = q_{N,n}^{0} + \bar q_{N,n}\,\mathbf{1}_{m_k \in \{\mathrm{defend},\mathrm{recover}\}},
+\label{eq:terminal_weight_n}
+\end{equation}
+\begin{equation}
+q_{N,\chi}^k = q_{N,\chi}^{0} + \bar q_{N,\chi}\,\mathbf{1}_{m_k=\mathrm{recover}},
+\label{eq:terminal_weight_chi}
+\end{equation}
+\begin{equation}
+\omega_{W}^k = \omega_W^0 + \bar\omega_W(1-\alpha_k),
+\qquad
+\omega_{M}^k = \omega_M^0 + \bar\omega_M(1-\alpha_k).
+\label{eq:terminal_weight_corridor}
+\end{equation}
+
+\subsubsection{Cost Modulation Matrix}
+
+The final tactical component is the cost modulation matrix
+\begin{equation}
+\Lambda_k^{\mathrm{cost}}
+=
+\mathrm{diag}
+\left(
+\lambda_{\mathrm{prog}}^k,\;
+\lambda_{\mathrm{smooth}}^k,\;
+\lambda_{\mathrm{int}}^k,\;
+\lambda_{\mathrm{term}}^k
+\right),
+\label{eq:cost_modulation_matrix_instantiated}
+\end{equation}
+with a mode-dependent design
+\begin{equation}
+\Lambda_k^{\mathrm{cost}}
+=
+\begin{cases}
+\mathrm{diag}(\lambda_p^f,\lambda_s^f,\lambda_i^f,\lambda_t^f), & m_k=\mathrm{follow},\\
+\mathrm{diag}(\lambda_p^a,\lambda_s^a,\lambda_i^a,\lambda_t^a), & m_k=\mathrm{attack},\\
+\mathrm{diag}(\lambda_p^d,\lambda_s^d,\lambda_i^d,\lambda_t^d), & m_k=\mathrm{defend},\\
+\mathrm{diag}(\lambda_p^r,\lambda_s^r,\lambda_i^r,\lambda_t^r), & m_k=\mathrm{recover}.
+\end{cases}
+\label{eq:cost_modulation_modes}
+\end{equation}
+
+\subsection{Tactically Parameterized Local OCP}
+\label{subsec:tactically_parameterized_ocp_detail}
+
+With the instantiated tactical guidance variable $\vartheta_k$, the local trajectory planner is formulated as
+\begin{equation}
+\mathcal{R}_e(X_k;\vartheta_k)
+=
+\arg\min_{\xi_e}
+J_e^{\mathrm{L}}(\xi_e;X_k,\vartheta_k)
+\quad
+\text{s.t.}
+\quad
+\xi_e \in \mathcal{F}_e(X_k;\vartheta_k).
+\label{eq:tactical_ocp_repeated}
+\end{equation}
+
+The planner operates in the Frenet frame over a spatial horizon $L_h$ discretized into $N$ spatial intervals, yielding $N+1$ shooting nodes, with
+\begin{equation}
+\Delta s = \frac{L_h}{N}.
+\label{eq:planner_spatial_step}
+\end{equation}
+
+\subsubsection{State and Control Variables}
+
+The planner state is
+\begin{equation}
+x_i =
+\begin{bmatrix}
+s_i,\;
+V_i,\;
+n_i,\;
+\chi_i,\;
+a_{x,i},\;
+a_{y,i},\;
+t_i
+\end{bmatrix}^{\!\top},
+\label{eq:planner_state_final}
+\end{equation}
+and the control is
+\begin{equation}
+u_i =
+\begin{bmatrix}
+j_{x,i},\;
+j_{y,i},\;
+\epsilon_{V,i}
+\end{bmatrix}^{\!\top},
+\label{eq:planner_control_final}
+\end{equation}
+where $j_x$ and $j_y$ are the longitudinal and lateral jerks, and $\epsilon_V$ is the speed-relaxation variable. Soft constraints are introduced through slack variables to maintain numerical robustness under tactical interaction and track-boundary compression.
+
+\subsubsection{Warm-Started Receding-Horizon Optimization}
+
+At each cycle, the shooting nodes are constructed as
+\begin{equation}
+s_i = s_0 + i\Delta s,\qquad i=0,\dots,N-1.
+\label{eq:shooting_nodes_final}
+\end{equation}
+If a valid previous solution exists, it is interpolated to warm-start the current optimization. Otherwise, a cold-start initialization is used based on the current Frenet state and local track curvature.
+
+\subsection{Tactical Shaping of the Feasible Corridor}
+\label{subsec:tactical_corridor_shaping}
+
+Let the nominal track boundaries at node $i$ be
+\begin{equation}
+w_{\mathrm{left}}(s_i),\qquad
+w_{\mathrm{right}}(s_i).
+\label{eq:nominal_boundaries_final}
+\end{equation}
+
+The local planner first applies nominal boundary shrinkage for vehicle size and static safety margin. It then predicts opponent motion and removes opponent-occupied lateral intervals from the corridor. The tactically feasible lateral corridor becomes
+\begin{equation}
+\mathcal{C}_i^k=
+\left[
+n_{i,\min}^k,\;
+n_{i,\max}^k
+\right],
+\label{eq:tactical_corridor_interval}
+\end{equation}
+with preferred occupancy reference
+\begin{equation}
+n_{i,\mathrm{pref}}^k = c_k^{\mathrm{corr}}(s_i),
+\label{eq:preferred_occupancy}
+\end{equation}
+subject to
+\begin{equation}
+n_{i,\mathrm{pref}}^k \in \mathcal{C}_i^k.
+\label{eq:preferred_occupancy_in_corridor}
+\end{equation}
+
+The feasible set is modulated through
+\begin{equation}
+d_{s,\mathrm{eff}}^k,\qquad
+d_{n,\mathrm{eff}}^k,\qquad
+\eta_k^{\mathrm{side}},\qquad
+c_k^{\mathrm{corr}}(s),
+\label{eq:feasible_set_modulators}
+\end{equation}
+which means that tactical decisions reshape both the interaction geometry and the feasible corridor of the local planner.
+
+\subsection{Tacticalized Objective Function of the Local Planner}
+\label{subsec:tacticalized_objective}
+
+Under tactical guidance, the lower-level objective is written as
+\begin{equation}
+J_e^{\mathrm{L}}(\xi_e;X_k,\vartheta_k)
+=
+\lambda_{\mathrm{prog}}^k J_e^{\mathrm{prog}}
++
+\lambda_{\mathrm{smooth}}^k J_e^{\mathrm{smooth}}
++
+\lambda_{\mathrm{int}}^k J_e^{\mathrm{int}}
++
+\lambda_{\mathrm{term}}^k J_e^{\mathrm{term}},
+\label{eq:local_objective_decomposition}
+\end{equation}
+where the vehicle dynamics are enforced through the feasible set and system constraints rather than through an additional additive cost term. Therefore, the tactically weighted OCP objective can be equivalently written as
+\begin{equation}
+J_e^{\mathrm{L}}
+=
+\lambda_{\mathrm{prog}}^k J_e^{\mathrm{prog}}
++
+\lambda_{\mathrm{smooth}}^k J_e^{\mathrm{smooth}}
++
+\lambda_{\mathrm{int}}^k J_e^{\mathrm{int}}
++
+\lambda_{\mathrm{term}}^k J_e^{\mathrm{term}}.
+\label{eq:tactical_ocp_objective_final}
+\end{equation}
+
+The interaction-guidance term is
+\begin{equation}
+J_e^{\mathrm{int}}
+=
+\sum_{i=0}^{N}
+\left(
+n_i-c_k^{\mathrm{corr}}(s_i)
+\right)^2,
+\label{eq:interaction_guided_cost}
+\end{equation}
+and the terminal tactical term is
+\begin{equation}
+J_e^{\mathrm{term}}
+=
+\left(
+x_N-x_{N,\mathrm{ref}}^k
+\right)^\top
+Q_{N,k}
+\left(
+x_N-x_{N,\mathrm{ref}}^k
+\right)
+-
+\omega_W^k W_e^N
+-
+\omega_M^k M_e^N
++
+\omega_\epsilon^k \|\epsilon_e^\star\|_1.
+\label{eq:terminal_cost_final}
+\end{equation}
+
+This is the lower-layer realization of the recursive-plannability objective derived in Section~\ref{sec:method_game}. Therefore, the local planner is encouraged not only to produce a feasible current maneuver, but also to terminate in a tactically sustainable state.
+
+\subsection{Trajectory Reconstruction and Executable Output}
+\label{subsec:trajectory_reconstruction_final}
+
+Once the OCP is solved, the optimized Frenet sequence is converted into a time-parameterized trajectory. Let the optimized state sequence be $\{x_i^\star\}_{i=0}^{N}$. The corresponding Frenet kinematics are
+\begin{equation}
+\dot s_i = \frac{V_i \cos\chi_i}{1-n_i\kappa(s_i)},
+\qquad
+\dot n_i = V_i \sin\chi_i,
+\label{eq:frenet_reconstruction_final_1}
+\end{equation}
+\begin{equation}
+\dot V_i = a_{x,i},
+\qquad
+\dot \chi_i
+=
+\frac{a_{y,i}}{\max(V_i,1)}
+-
+\kappa(s_i)\dot s_i,
+\label{eq:frenet_reconstruction_final_2}
+\end{equation}
+where $\kappa(s_i)$ denotes the track curvature.
+
+
+The optimized trajectory is then resampled at fixed temporal intervals and mapped to Cartesian space using the track centerline geometry, yielding the executable local trajectory
+\begin{equation}
+\Xi_e =
+\left\{
+x(t),\;
+y(t),\;
+\psi(t),\;
+v(t),\;
+\kappa(t)
+\right\}_{t=0}^{T_{\mathrm{out}}}.
+\label{eq:final_trajectory_output}
+\end{equation}
+
+\subsection{Interpretation of the Hierarchical Coupling}
+\label{subsec:interpretation_hierarchical_coupling}
+
+The proposed interface establishes a principled connection between the game-theoretic tactical layer and the local trajectory optimizer.
+
+First, the upper layer outputs semantically meaningful tactical quantities $(m_k,\ell_k,\alpha_k,\rho_k)$ rather than low-level geometric primitives.
+
+Second, these tactical quantities are transformed into a structured planner guidance variable $\vartheta_k$, which affects the local planner through interaction budget, corridor shaping, terminal target sets, and cost modulation.
+
+Third, the local planner remains a receding-horizon optimal control solver that computes the dynamically feasible optimal response
+\begin{equation}
+\xi_e^\star = \mathcal{R}_e(X_k;\vartheta_k).
+\label{eq:lower_response_again}
+\end{equation}
+
+Therefore, the final hierarchical decision--planning pipeline is
+\begin{equation}
+a_k
+\;\xrightarrow{\;\mathcal{T}\;}
+\vartheta_k
+\;\xrightarrow{\;\mathcal{R}_e\;}
+\xi_e^\star
+\;\xrightarrow{\;\text{reconstruction}\;}
+\Xi_e.
+\label{eq:final_pipeline_revised}
+\end{equation}
+
+This formulation is fully consistent with the previous two sections: the Stackelberg--IBR game determines the tactical equilibrium structure, the theory-guided hybrid PPO approximates the tactical equilibrium policy, and the tactically parameterized local planner realizes the selected maneuver through a dynamically feasible local trajectory.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+
+
+
+
+
+
+\section{CONCLUSION}
+
+% In this paper, the cooperative interception problem of UAV swarms against highly dynamic and maneuverable attacking UAV swarms in adversarial combat scenarios has been investigated, while explicitly accounting for real-time decision requirements, coordinated engagement effectiveness, and the terminal overload risk induced by saturation interception. The cooperative interception problem is formulated by jointly considering target assignment and cooperative guidance, and an intelligent temporally coordinated interception framework is subsequently developed. In particular, a fast target assignment mechanism is designed to enable efficient and accurate resource allocation in dynamic environments, and a cooperative guidance strategy under the CTDE paradigm is incorporated to improve learning stability and training efficiency in large-scale adversarial settings. Finally, extensive simulation studies and comparative evaluations are conducted, where the proposed strategy is shown to accelerate target assignment, enhance interception efficiency, and improve interception success rates, meanwhile effectively alleviating terminal overload saturation in temporally synchronized multi-UAV engagements.
+
+% For future work, several directions deserve further investigation, including cooperative interception under incomplete and uncertain information, dynamic target reassignment in unknown and rapidly changing environments, time-constrained /target assignment with explicit completion deadlines, and the integration of the proposed coordination strategy with more realistic constraints (e.g., communication delays, limited bandwidth, and heterogeneous UAV capabilities) to further improve its applicability in more complex scenarios.
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+
+\bibliographystyle{cja}
+\bibliography{cja-template}
+
+%% else use the following coding to input the bibitems directly in the
+%% TeX file.
+
+%% \begin{thebibliography}{00}
+%%
+%% \bibitem{label}
+%% Text of bibliographic item
+%%
+%% \end{thebibliography}
+
+
+
+%% The Appendices part is started with the command \appendix;
+%% appendix sections are then done as normal sections
+
+
+
+
+\end{document}

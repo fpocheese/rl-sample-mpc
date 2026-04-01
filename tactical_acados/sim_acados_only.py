@@ -219,7 +219,7 @@ def run_simulation(n_steps: int = 1000, visualize: bool = True):
 
         # Visualize
         if visualize:
-            viz.update(state, trajectory)
+            viz.update(state, trajectory, guidance=guidance)
 
         # Perfect tracking update
         state = perfect_tracking_update(

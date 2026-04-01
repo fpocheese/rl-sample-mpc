@@ -1,11 +1,13 @@
 """
-Full tactical simulation entry point (Phase 3).
+Full tactical simulation entry point.
 
 Runs a 3-car tactical racing simulation:
   Scenario YAML → ego + opponents → tactical decision → safe wrapper →
   planner guidance → ACADOS plan → perfect tracking
 
-Configure settings directly in the __main__ block below.
+关键改动：
+- PREPARE_OVERTAKE 不再进入 follow module 的前处理和后处理
+- follow module 只服务于真正的 FOLLOW 模式
 """
 
 import os
@@ -28,7 +30,7 @@ from point_mass_model import export_point_mass_ode_model
 
 from config import TacticalConfig
 from acados_planner import AcadosTacticalPlanner
-from tactical_action import TacticalAction, PlannerGuidance, get_fallback_action
+from tactical_action import TacticalAction, PlannerGuidance, get_fallback_action, TacticalMode
 from observation import TacticalObservation, build_observation
 from safe_wrapper import SafeTacticalWrapper
 from planner_guidance import TacticalToPlanner
@@ -84,12 +86,12 @@ def run_tactical_simulation(
         cfg=cfg,
     )
 
-    # Create tactical components
+    # Tactical components
     safe_wrapper = SafeTacticalWrapper(cfg)
     tactical_mapper = TacticalToPlanner(track_handler, cfg)
     p2p = PushToPass(cfg)
 
-    # Create policy
+    # Policy
     if policy_type == 'heuristic':
         from policies.heuristic_policy import HeuristicTacticalPolicy
         policy = HeuristicTacticalPolicy(cfg)
@@ -111,7 +113,7 @@ def run_tactical_simulation(
         start_ay=ego_cfg.get('start_ay', 0.0),
     )
 
-    # Create opponents
+    # Opponents
     opponents = []
     for opp_cfg in opp_cfgs:
         opp = OpponentVehicle(
@@ -126,16 +128,17 @@ def run_tactical_simulation(
         )
         opponents.append(opp)
 
-    # Create follow module (for FOLLOW mode and fallback)
+    # Follow module only for true FOLLOW mode
     follow_mod = FollowModule(track_handler, cfg)
 
     # Visualization
     if visualize:
         from visualizer_tactical import TacticalVisualizer
-        viz = TacticalVisualizer(track_handler, gg_handler, params,
-                                  n_opponents=len(opponents))
+        viz = TacticalVisualizer(
+            track_handler, gg_handler, params,
+            n_opponents=len(opponents)
+        )
 
-    # Previous action for smoothness
     prev_action = get_fallback_action()
 
     # Logging
@@ -154,10 +157,10 @@ def run_tactical_simulation(
     for step in range(max_steps):
         t_start = time.time()
 
-        # Step 1: Build observation
+        # 1) Build observation
         opp_predictions = [opp.predict() for opp in opponents]
         opp_states = [opp.get_state() for opp in opponents]
-        # Merge prediction data into states
+
         for os_dict, pred in zip(opp_states, opp_predictions):
             os_dict['pred_s'] = pred['pred_s']
             os_dict['pred_n'] = pred['pred_n']
@@ -174,45 +177,42 @@ def run_tactical_simulation(
             cfg=cfg,
         )
 
-        # Step 2: Get tactical action from policy
+        # 2) Tactical action
         action = policy.act(obs)
 
-        # Step 3: Handle P2P
+        # 3) Handle P2P
         if action.p2p_trigger and p2p.available:
             p2p.activate()
             action.p2p_trigger = True
         else:
             action.p2p_trigger = p2p.active
 
-        # Step 4: Map tactical action to planner guidance
+        # 4) Map to planner guidance
         guidance = tactical_mapper.map(action, obs, N_stages=cfg.N_steps_acados)
 
-        # Step 4.5: If FOLLOW or PREPARE_OVERTAKE mode, apply follow module
-        from tactical_action import TacticalMode
-        if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and opponents:
+        # 4.5) Apply follow module ONLY for FOLLOW mode
+        if action.mode == TacticalMode.FOLLOW and opponents:
             leader = follow_mod.find_nearest_car(ego_state['s'], opp_states)
             if leader is not None:
                 follow_mods = follow_mod.get_follow_guidance_modifiers(ego_state, leader)
                 guidance.speed_scale = min(guidance.speed_scale, follow_mods['speed_scale'])
                 guidance.speed_cap = min(guidance.speed_cap, follow_mods['speed_cap'])
-                # Only strictly track leader laterally if purely following
-                if action.mode == TacticalMode.FOLLOW:
-                    guidance.terminal_n_target = follow_mods['terminal_n_target']
+                guidance.terminal_n_target = follow_mods['terminal_n_target']
                 guidance.safety_distance = max(guidance.safety_distance, follow_mods['safety_distance'])
                 guidance.follow_target_id = follow_mods['follow_target_id']
 
-        # Step 5: Plan with ACADOS
+        # 5) Plan
         trajectory = planner.plan(ego_state, guidance)
 
-        # Step 5.5: If FOLLOW or PREPARE_OVERTAKE mode, apply follow post-processing
-        if action.mode in (TacticalMode.FOLLOW, TacticalMode.PREPARE_OVERTAKE) and opponents:
+        # 5.5) Post-process FOLLOW only
+        if action.mode == TacticalMode.FOLLOW and opponents:
             leader = follow_mod.find_nearest_car(ego_state['s'], opp_states)
             if leader is not None:
                 trajectory = follow_mod.post_process_trajectory(trajectory, ego_state, leader)
 
         t_plan = time.time() - t_start
 
-        # Step 6: Visualize
+        # 6) Visualize
         if visualize:
             tactical_info = (
                 f"Mode:  {action.discrete_tactic.name}\n"
@@ -220,23 +220,26 @@ def run_tactical_simulation(
                 f"P2P:   {'ACTIVE' if p2p.active else 'avail' if p2p.available else 'used'}\n"
                 f"Horiz: {planner.current_horizon_m:.0f}m"
             )
-            viz.update(ego_state, trajectory,
-                       opponents=opp_predictions,
-                       tactical_info=tactical_info)
+            viz.update(
+                ego_state, trajectory,
+                opponents=opp_predictions,
+                tactical_info=tactical_info,
+                guidance=guidance
+            )
 
-        # Step 7: Move opponents
+        # 7) Move opponents
         for opp in opponents:
             opp.step(cfg.assumed_calc_time, ego_state)
 
-        # Step 8: Advance P2P timer
+        # 8) Advance P2P timer
         p2p.step(cfg.assumed_calc_time)
 
-        # Step 9: Perfect tracking update for ego
+        # 9) Perfect tracking update for ego
         ego_state = perfect_tracking_update(
             ego_state, trajectory, cfg.assumed_calc_time, track_handler
         )
 
-        # Step 10: Log
+        # 10) Log
         log['step'].append(step)
         log['s'].append(ego_state['s'])
         log['n'].append(ego_state['n'])
@@ -245,41 +248,73 @@ def run_tactical_simulation(
         log['alpha'].append(action.aggressiveness)
         log['planner_ok'].append(planner.planner_healthy)
 
-        # Check scenario boundary
+        # Collect detailed debug trace per instruction
+        debug_cycle = {
+            'step': step,
+            's': ego_state['s'],
+            'raw_tactic': getattr(policy, 'debug_info', {}).get('raw_tactic', 'N/A'),
+            'sanitized_tactic': action.discrete_tactic.name,
+            'safe_set': getattr(policy, 'debug_info', {}).get('safe_set', []),
+            'follow_mod': action.mode == TacticalMode.FOLLOW and bool(opponents),
+            'planner_ok': planner.planner_healthy,
+            'used_fallback': getattr(planner, 'debug_log', {}).get('used_fallback', False),
+            'term_n': guidance.terminal_n_target,
+            'v_scale': getattr(guidance, 'speed_scale', 1.0),
+            'safe_dist': guidance.safety_distance,
+            'min_w': getattr(guidance, 'corridor_debug', {}).get('min_corridor_width', 99.0),
+            'bias_gain': getattr(planner, 'debug_log', {}).get('bias_gain', 1.0),
+            'exception': getattr(planner, 'debug_log', {}).get('exception', None),
+        }
+        if hasattr(policy, 'debug_info'):
+            for k in ['phase', 'target_id', 'gap', 'locked_side', 'phase_time']:
+                debug_cycle[f'policy_{k}'] = policy.debug_info.get(k)
+                
+        if 'debug' not in log:
+            log['debug'] = []
+        log['debug'].append(debug_cycle)
+
+        # Scenario boundary
         if ego_state['s'] > sc.get('s_end', 1e6):
             print(f"\n*** Scenario boundary reached at step {step} ***")
             break
 
-        # Collision check (simplified)
+        # Collision check
         for opp in opponents:
-            dist = np.sqrt((ego_state['x'] - opp.x)**2 +
-                           (ego_state['y'] - opp.y)**2)
+            dist = np.sqrt((ego_state['x'] - opp.x) ** 2 + (ego_state['y'] - opp.y) ** 2)
             if dist < cfg.vehicle_length * 0.5:
                 print(f"\n*** COLLISION at step {step}! ***")
 
         prev_action = action
 
-        if step % 20 == 0:
+        if step % 20 == 0 or not planner.planner_healthy or debug_cycle['raw_tactic'] != debug_cycle['sanitized_tactic']:
             opp_info = " | ".join([f"Opp{o.vehicle_id}: s={o.s:.0f}" for o in opponents])
-            print(f"[{step:4d}] s={ego_state['s']:7.1f} n={ego_state['n']:5.2f} "
-                  f"V={ego_state['V']:5.1f} | {action.discrete_tactic.name:15s} "
-                  f"α={action.aggressiveness:.2f} | {opp_info} | "
-                  f"{t_plan*1000:.0f}ms")
+            print(
+                f"[{step:4d}] s={ego_state['s']:7.1f} n={ego_state['n']:5.2f} "
+                f"V={ego_state['V']:5.1f} | {action.discrete_tactic.name:20s} "
+                f"α={action.aggressiveness:.2f} | {opp_info} | "
+                f"{t_plan*1000:.0f}ms"
+            )
+            # Log special heuristic discrepancies or errors
+            if debug_cycle['raw_tactic'] != debug_cycle['sanitized_tactic']:
+                print(f"   [!] WRAPPER BLOCKED: Raw={debug_cycle['raw_tactic']} -> {debug_cycle['sanitized_tactic']} "
+                      f"(SafeSet={debug_cycle['safe_set']})")
+            if not planner.planner_healthy:
+                print(f"   [!] PLANNER FAILED: used_fallback={debug_cycle['used_fallback']} "
+                      f"min_w={debug_cycle['min_w']:.2f} err={debug_cycle['exception']}")
 
     planner_success_rate = sum(log['planner_ok']) / max(len(log['planner_ok']), 1) * 100
-    print(f"\nDone: {len(log['step'])} steps, "
-          f"planner OK {planner_success_rate:.1f}%")
+    print(f"\nDone: {len(log['step'])} steps, planner OK {planner_success_rate:.1f}%")
 
     return log
 
 
 if __name__ == '__main__':
     # ============================================================
-    # Configure simulation settings here (no CLI args needed)
+    # Configure simulation settings here
     # ============================================================
     SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
-    VISUALIZE = True            # Set to False for headless mode
-    MAX_STEPS = 999999          # Set very large for unlimited
+    VISUALIZE = True
+    MAX_STEPS = 999999
     POLICY = 'heuristic'        # 'heuristic' or 'random'
     # ============================================================
 

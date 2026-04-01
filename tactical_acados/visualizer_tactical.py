@@ -42,6 +42,12 @@ class TacticalVisualizer:
 
         self.traj_line, = self.ax_track.plot([], [], 'b-', linewidth=2,
                                               label='Trajectory')
+
+        self.corridor_left_line, = self.ax_track.plot([], [], 'c--', linewidth=1.5,
+                                                      label='Dynamic Left Bound')
+        self.corridor_right_line, = self.ax_track.plot([], [], 'c--', linewidth=1.5,
+                                                       label='Dynamic Right Bound')
+                                                      
         veh = params['vehicle_params']
         self.ego_rect = Rectangle((0, 0), veh['total_length'], veh['total_width'],
                                   angle=0, color='dodgerblue', alpha=0.8)
@@ -84,7 +90,7 @@ class TacticalVisualizer:
 
         self.fig.tight_layout()
 
-    def update(self, state, trajectory, opponents=None, tactical_info=None):
+    def update(self, state, trajectory, opponents=None, tactical_info=None, guidance=None):
         """Update all plots with current state and trajectory."""
         # Trajectory on track
         self.traj_line.set_xdata(trajectory['x'])
@@ -98,6 +104,21 @@ class TacticalVisualizer:
         self.ego_rect.set_y(state['y'] - veh['total_length']/2 * np.sin(heading)
                             - veh['total_width']/2 * np.cos(heading))
         self.ego_rect.set_angle(np.rad2deg(heading))
+
+        # Dynamic Corridor
+        if guidance is not None and getattr(guidance, 'n_left_override', None) is not None:
+            N_st = len(guidance.n_left_override)
+            # Acados default optimization horizon is 300
+            s_ahead = np.linspace(state['s'], state['s'] + 300.0, N_st) % self.track_handler.s[-1]
+            left_xyz = self.track_handler.sn2cartesian(s_ahead, guidance.n_left_override)
+            right_xyz = self.track_handler.sn2cartesian(s_ahead, guidance.n_right_override)
+            if left_xyz.ndim == 1:
+                left_xyz = left_xyz.reshape(1, -1)
+                right_xyz = right_xyz.reshape(1, -1)
+            self.corridor_left_line.set_xdata(left_xyz[:, 0])
+            self.corridor_left_line.set_ydata(left_xyz[:, 1])
+            self.corridor_right_line.set_xdata(right_xyz[:, 0])
+            self.corridor_right_line.set_ydata(right_xyz[:, 1])
 
         # Zoom
         if self.zoom_on_ego:

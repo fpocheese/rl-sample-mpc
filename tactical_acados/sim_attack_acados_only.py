@@ -171,7 +171,8 @@ def run_tactical_simulation(
             tactical_info = "Mode: A2RL_RAW_OCP\nPure Bound Carving\n(No Decision Layer)"
             viz.update(ego_state, trajectory,
                        opponents=opp_predictions,
-                       tactical_info=tactical_info)
+                       tactical_info=tactical_info,
+                       guidance=guidance)
 
         # Step 7: Move opponents
         for opp in opponents:

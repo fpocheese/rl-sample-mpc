@@ -49,6 +49,7 @@ class AcadosTacticalPlanner:
         self._prev_solution: Optional[dict] = None
         self._prev_trajectory: Optional[dict] = None
         self._consecutive_failures: int = 0
+        self.debug_log: dict = {}
 
     def plan(
             self,
@@ -74,16 +75,31 @@ class AcadosTacticalPlanner:
         base_v_max = self.vehicle_params.get('v_max', 90.0)
         effective_v_max = guidance.get_effective_v_max(base_v_max, self.cfg)
 
+        # Initialize debug log for this cycle
+        self.debug_log = {
+            'used_fallback': False,
+            '_consecutive_failures': self._consecutive_failures,
+            'resample_ok': True,
+            'applied_terminal_bias': False,
+            'terminal_n_target': guidance.terminal_n_target if guidance else 0.0,
+            'current_horizon_m': self.cfg.optimization_horizon_m,
+            'exception': None,
+            'bias_gain': 1.0,
+        }
+
         # Try ACADOS planner
         trajectory = self._try_plan(state, guidance, effective_v_max)
 
         if trajectory is not None:
             self._consecutive_failures = 0
             self._prev_trajectory = trajectory
+            self.debug_log['_consecutive_failures'] = 0
             return trajectory
         else:
             # Fallback
             self._consecutive_failures += 1
+            self.debug_log['_consecutive_failures'] = self._consecutive_failures
+            self.debug_log['used_fallback'] = True
             return self._generate_fallback(state)
 
     def _try_plan(
@@ -116,6 +132,7 @@ class AcadosTacticalPlanner:
             trajectory = self._resample_to_time_domain(raceline, state)
 
             if trajectory is None:
+                self.debug_log['resample_ok'] = False
                 return None
 
             # Step 3: Apply terminal bias if specified
@@ -125,7 +142,7 @@ class AcadosTacticalPlanner:
             return trajectory
 
         except Exception as e:
-            # print(f"[AcadosTacticalPlanner] Planner failed: {e}")
+            self.debug_log['exception'] = str(e)
             return None
 
     def _resample_to_time_domain(
@@ -227,9 +244,11 @@ class AcadosTacticalPlanner:
     ) -> dict:
         """Apply a smooth terminal lateral bias to the trajectory."""
         N = len(trajectory['t'])
-        # Ramp the bias from 0 at start to full at end
         ramp = np.linspace(0.0, 1.0, N) ** 2  # quadratic ramp
-        n_bias = ramp * guidance.terminal_n_target * 0.3  # conservative application
+
+        n_bias = ramp * guidance.terminal_n_target * 0.3
+        self.debug_log['applied_terminal_bias'] = True
+        self.debug_log['bias_gain'] = 1.0
 
         # Clip to track bounds
         s_arr = trajectory['s']
@@ -256,85 +275,51 @@ class AcadosTacticalPlanner:
 
     def _generate_fallback(self, state: dict) -> dict:
         """
-        Generate a safe, kinematically contiguous fallback trajectory:
-        1. Follows the remaining valid time-slices of the last successful plan.
-        2. Extrapolates coasting kinematics for any future time beyond the old plan's horizon.
+        Generate fallback trajectory by holding array states or rolling historic traces.
+        Reverted to earlier stable version that does not decay speed exponentially.
         """
-        print(f"[AcadosTacticalPlanner] Using fallback "
-              f"(consecutive failures: {self._consecutive_failures})")
-
         N = self.cfg.n_trajectory_points
-        horizon = self.cfg.planning_horizon
-        t_out = np.linspace(0.0, horizon, N)
         dt = self.cfg.dt
-
-        # Shift amount based on consecutive failures
-        shift_t = self._consecutive_failures * dt
-        trajectory = {'t': t_out}
-
-        # Coasting fallback parameters
-        V_min = self.cfg.V_min
+        horizon = self.cfg.planning_horizon
 
         # If we have a successful previous trajectory, use it as the base
         if self._prev_trajectory is not None:
-            prev = self._prev_trajectory
-            t_prev = prev['t']
-            eval_t = t_out + shift_t
-
-            valid_mask = eval_t <= t_prev[-1]
-            invalid_mask = ~valid_mask
-
-            for key in ['s', 'V', 'n', 'chi', 'ax', 'ay', 's_dot', 'n_dot', 's_ddot', 'n_ddot']:
-                trajectory[key] = np.zeros(N)
-                if np.any(valid_mask):
-                    trajectory[key][valid_mask] = np.interp(
-                        eval_t[valid_mask], t_prev, prev[key]
-                    )
-
-            if np.any(invalid_mask):
-                if np.any(valid_mask):
-                    last_idx = np.where(valid_mask)[0][-1]
-                    s0 = trajectory['s'][last_idx]
-                    V0 = max(trajectory['V'][last_idx], V_min)
-                    n0 = trajectory['n'][last_idx]
-                    chi0 = trajectory['chi'][last_idx]
-                    t_start = t_out[last_idx]
+            traj = {}
+            for key, val in self._prev_trajectory.items():
+                if isinstance(val, np.ndarray) and len(val) == N:
+                    # Simple shift by one step (dt=0.125s)
+                    rolled = np.roll(val, -1)
+                    rolled[-1] = rolled[-2] # hold last
+                    traj[key] = rolled
                 else:
-                    s0 = state['s']
-                    V0 = max(state['V'], V_min)
-                    n0 = state['n']
-                    chi0 = state['chi']
-                    t_start = 0.0
+                    traj[key] = val
+            return traj
 
-                dt_extrap = t_out[invalid_mask] - t_start
-                V_extrap = V0 * np.exp(-dt_extrap / 5.0)
-                trajectory['V'][invalid_mask] = V_extrap
-                trajectory['s'][invalid_mask] = s0 + 5.0 * V0 * (1.0 - np.exp(-dt_extrap / 5.0))
-                trajectory['n'][invalid_mask] = n0
-                trajectory['chi'][invalid_mask] = chi0 * np.exp(-dt_extrap / 2.0)
-                
-        else:
-            # Immediate cold fallback (no previous history)
-            V0 = max(state['V'], V_min) * (0.95 ** (self._consecutive_failures / 5.0))
-            trajectory['V'] = np.ones(N) * V0
-            trajectory['s'] = state['s'] + V0 * t_out
-            trajectory['n'] = np.ones(N) * state['n']
-            trajectory['chi'] = state['chi'] * np.exp(-t_out / 1.5)
-            for key in ['ax', 'ay', 's_ddot', 'n_ddot']:
-                trajectory[key] = np.zeros(N)
-            trajectory['s_dot'] = trajectory['V'] * np.cos(trajectory['chi'])
-            trajectory['n_dot'] = trajectory['V'] * np.sin(trajectory['chi'])
-
-        # Finalize geometry
-        trajectory['s'] = trajectory['s'] % self.track_handler.s[-1]
-        xyz = self.track_handler.sn2cartesian(trajectory['s'], trajectory['n'])
+        # Absolute cold fallback if no history
+        t_out = np.linspace(0.0, horizon, N)
+        v0 = max(state['V'], 5.0)
+        s_out = (state['s'] + v0 * t_out) % self.track_handler.s[-1]
+        n_out = np.full(N, state['n'])
+        xyz = self.track_handler.sn2cartesian(s_out, n_out)
         if xyz.ndim == 1:
             xyz = xyz.reshape(1, -1)
-        trajectory['x'] = xyz[:, 0]
-        trajectory['y'] = xyz[:, 1]
-        trajectory['z'] = xyz[:, 2]
 
-        return trajectory
+        return {
+            't': t_out,
+            's': s_out,
+            'n': n_out,
+            'V': np.full(N, v0),
+            'chi': np.full(N, state['chi']),
+            'ax': np.zeros(N),
+            'ay': np.zeros(N),
+            'x': xyz[:, 0],
+            'y': xyz[:, 1],
+            'z': xyz[:, 2],
+            's_dot': np.full(N, v0),
+            'n_dot': np.zeros(N),
+            's_ddot': np.zeros(N),
+            'n_ddot': np.zeros(N),
+        }
 
     @property
     def planner_healthy(self) -> bool:
