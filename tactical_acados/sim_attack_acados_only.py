@@ -50,8 +50,16 @@ def run_tactical_simulation(
         max_steps: int = 999999,
         visualize: bool = True,
         policy_type: str = 'heuristic',
+        carver_mode: str = 'auto',
+        shadow_side: str = 'left',
+        overtake_side: str = None,
 ):
-    """Run full tactical 3-car simulation."""
+    """Run full tactical 3-car simulation with multi-mode carver."""
+
+    # Make mode config accessible in loop
+    CARVER_MODE = carver_mode
+    SHADOW_SIDE = shadow_side
+    OVERTAKE_SIDE = overtake_side
 
     # Load scenario
     scenario = load_scenario(scenario_name)
@@ -84,8 +92,8 @@ def run_tactical_simulation(
         cfg=cfg,
     )
 
-    # Replace all tactical components with raw A2RL carver
-    from a2rl_obstacle_carver import A2RLObstacleCarver
+    # Replace all tactical components with raw A2RL carver (v2 multi-mode)
+    from a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
     a2rl_carver = A2RLObstacleCarver(track_handler, cfg)
 
     # Initial ego state
@@ -149,15 +157,52 @@ def run_tactical_simulation(
             os_dict['pred_s'] = pred['pred_s']
             os_dict['pred_n'] = pred['pred_n']
 
-        # Step 2: Use matching C++ logic to carve boundaries directly, bypassing tactic modes completely
+        # Step 2: Determine carver mode based on gap
         horizon_m = cfg.optimization_horizon_m
         ds = horizon_m / cfg.N_steps_acados
+
+        # Compute gap to nearest opponent ahead
+        nearest_gap = 999.0
+        for os_dict in opp_states:
+            g = os_dict['s'] - ego_state['s']
+            tl = track_handler.s[-1]
+            if g > tl / 2: g -= tl
+            elif g < -tl / 2: g += tl
+            if 0 < g < nearest_gap:
+                nearest_gap = g
+
+        # Mode selection logic: FOLLOW -> SHADOW -> OVERTAKE
+        if CARVER_MODE == 'auto':
+            if nearest_gap > 40.0:
+                current_mode = CarverMode.FOLLOW
+                mode_label = "FOLLOW"
+            elif nearest_gap > 12.0:
+                current_mode = CarverMode.SHADOW
+                mode_label = "SHADOW"
+            else:
+                if a2rl_carver.overtake_ready or nearest_gap < 8.0:
+                    current_mode = CarverMode.OVERTAKE
+                    mode_label = "OVERTAKE"
+                else:
+                    current_mode = CarverMode.SHADOW
+                    mode_label = "SHADOW"
+        else:
+            current_mode = {
+                'follow': CarverMode.FOLLOW,
+                'shadow': CarverMode.SHADOW,
+                'overtake': CarverMode.OVERTAKE,
+            }.get(CARVER_MODE, CarverMode.OVERTAKE)
+            mode_label = current_mode.name
+
         guidance = a2rl_carver.construct_guidance(
-            ego_state, 
-            opp_states, 
-            cfg.N_steps_acados, 
-            ds, 
-            prev_trajectory=planner._prev_trajectory
+            ego_state,
+            opp_states,
+            cfg.N_steps_acados,
+            ds,
+            mode=current_mode,
+            shadow_side=SHADOW_SIDE,
+            overtake_side=OVERTAKE_SIDE,
+            prev_trajectory=planner._prev_trajectory,
         )
 
         # Step 5: Plan with ACADOS
@@ -168,7 +213,13 @@ def run_tactical_simulation(
         t_plan = time.time() - t_start
 
         if visualize:
-            tactical_info = "Mode: A2RL_RAW_OCP\nPure Bound Carving\n(No Decision Layer)"
+            rdy = "YES" if a2rl_carver.overtake_ready else "no"
+            tactical_info = (
+                f"Mode: {mode_label}\n"
+                f"Gap: {nearest_gap:.1f}m\n"
+                f"OT_Ready: {rdy}\n"
+                f"Carver v2"
+            )
             viz.update(ego_state, trajectory,
                        opponents=opp_predictions,
                        tactical_info=tactical_info,
@@ -188,7 +239,7 @@ def run_tactical_simulation(
         log['s'].append(ego_state['s'])
         log['n'].append(ego_state['n'])
         log['V'].append(ego_state['V'])
-        log['tactic'].append(f"A2RL_RAW")
+        log['tactic'].append(mode_label)
         log['alpha'].append(1.0)
         log['planner_ok'].append(planner.planner_healthy)
 
@@ -206,9 +257,10 @@ def run_tactical_simulation(
 
         if step % 20 == 0:
             opp_info = " | ".join([f"Opp{o.vehicle_id}: s={o.s:.0f}" for o in opponents])
+            rdy_str = " OT_RDY!" if a2rl_carver.overtake_ready else ""
             print(f"[{step:4d}] s={ego_state['s']:7.1f} n={ego_state['n']:5.2f} "
-                  f"V={ego_state['V']:5.1f} | A2RL_RAW_MPC_CARVING "
-                  f"| {opp_info} | "
+                  f"V={ego_state['V']:5.1f} | {mode_label:10s} gap={nearest_gap:5.1f}"
+                  f"{rdy_str} | {opp_info} | "
                   f"{t_plan*1000:.0f}ms")
 
     planner_success_rate = sum(log['planner_ok']) / max(len(log['planner_ok']), 1) * 100
@@ -225,7 +277,16 @@ if __name__ == '__main__':
     SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
     VISUALIZE = True            # Set to False for headless mode
     MAX_STEPS = 999999          # Set very large for unlimited
-    POLICY = 'reactive'        # 'heuristic' or 'random'
+    POLICY = 'reactive'         # unused but kept for API compat
+
+    # ---- Carver Mode Config ----
+    # 'auto'     : auto-switch FOLLOW->SHADOW->OVERTAKE based on gap
+    # 'follow'   : force FOLLOW mode (test stable following)
+    # 'shadow'   : force SHADOW mode (test side-threatening)
+    # 'overtake' : force OVERTAKE mode (original v1 behavior)
+    CARVER_MODE = 'auto'
+    SHADOW_SIDE = 'left'        # 'left' or 'right' for SHADOW mode
+    OVERTAKE_SIDE = None        # None=auto, 'left', 'right' for OVERTAKE
     # ============================================================
 
     run_tactical_simulation(
@@ -233,4 +294,7 @@ if __name__ == '__main__':
         max_steps=MAX_STEPS,
         visualize=VISUALIZE,
         policy_type=POLICY,
+        carver_mode=CARVER_MODE,
+        shadow_side=SHADOW_SIDE,
+        overtake_side=OVERTAKE_SIDE,
     )

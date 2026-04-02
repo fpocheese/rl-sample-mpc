@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 """
-Heuristic tactical policy with memory / phase machine (v2).
+Heuristic tactical policy with memory / phase machine.
 
-Enhanced with FOLLOW + SHADOW phases for obstacle-carver integration.
+目标行为：
+1. 看到前车先追近（CHASE）
+2. 进入合适距离后选边探头（PROBE）
+3. 探头维持一段时间，避免左右来回切
+4. 若窗口打开则提交超车（COMMIT）
+5. 若机会不好则撤回并短暂冷却（ABORT / COOLDOWN）
 
-Phase flow:
-  RACE -> CHASE -> FOLLOW -> SHADOW_{L/R} -> COMMIT_{L/R}
-  Any combative phase -> ABORT -> FOLLOW (via cooldown)
-
-Outputs:
-  - TacticalAction (discrete_tactic, aggressiveness, preference, p2p)
-  - carver_mode property: recommended CarverMode for A2RLObstacleCarver
-  - carver_side property: recommended side for SHADOW/OVERTAKE
+设计原则：
+- 不是单步反应式分类器，而是有内部战术状态
+- 不追求绝对最优，追求连贯、稳定、像人一样“先压上去再找机会”
 """
 
 import numpy as np
@@ -27,14 +26,12 @@ from config import TacticalConfig, DEFAULT_CONFIG
 
 class HeuristicTacticalPolicy:
     """
-    Stateful heuristic tactical policy (v2).
+    Stateful heuristic tactical policy.
 
     Internal phases:
     - RACE: no relevant opponent, run raceline
     - CHASE: aggressively close gap to target ahead
-    - FOLLOW: stable car-following (new in v2)
-    - SHADOW_LEFT / SHADOW_RIGHT: side-threatening pressure (new in v2)
-    - PROBE_LEFT / PROBE_RIGHT: (legacy, maps to SHADOW internally)
+    - PROBE_LEFT / PROBE_RIGHT: pull out and maintain probe
     - COMMIT_LEFT / COMMIT_RIGHT: execute overtake
     - ABORT: recentre and stabilize briefly
     """
@@ -46,59 +43,37 @@ class HeuristicTacticalPolicy:
         # ---- Tactical FSM memory ----
         self.phase: str = "RACE"
         self.target_id: Optional[int] = None
-        self.locked_side: Optional[str] = None
+        self.locked_side: Optional[str] = None  # "left" / "right" / None
         self.phase_time: float = 0.0
         self.cooldown_time: float = 0.0
 
+        # remember previous gap to infer closing / stagnation
         self.last_target_gap: Optional[float] = None
-        self._overtake_ready_ext: bool = False  # external signal from carver
 
         # ---- Tunable phase thresholds ----
         self.dt = float(cfg.assumed_calc_time)
 
         # gap windows [m]
         self.chase_enter_gap = 60.0
-        self.follow_enter_gap = 20.0      # CHASE -> FOLLOW
-        self.shadow_enter_gap = 16.0      # FOLLOW -> SHADOW (after stable follow)
-        self.commit_enter_gap = 10.0      # SHADOW -> COMMIT
-        self.abort_gap = 22.0             # abort if gap opens up
+        self.probe_enter_gap_hi = 18.0
+        self.probe_enter_gap_lo = 8.0
+        self.commit_enter_gap = 10.0
+        self.abort_gap = 22.0
 
         # phase minimum durations [s]
-        self.follow_min_hold = 1.0        # must follow stably for >= 1s
-        self.shadow_min_hold = 0.60
+        self.probe_min_hold = 0.60
         self.commit_min_hold = 0.50
         self.abort_hold = 0.50
         self.cooldown_hold = 0.60
 
         # curve thresholds
-        self.curvature_shadow_limit = 0.025
+        self.curvature_probe_limit = 0.025
         self.curvature_commit_limit = 0.018
 
-        # ---- Carver mode output ----
-        self._carver_mode_str = 'overtake'  # 'follow', 'shadow', 'overtake'
-        self._carver_side = None
-
-    # ------------------------------------------------------------------
-    # Public properties for carver integration
-    # ------------------------------------------------------------------
-    @property
-    def carver_mode_str(self) -> str:
-        """Recommended carver mode string: 'follow', 'shadow', 'overtake'."""
-        return self._carver_mode_str
-
-    @property
-    def carver_side(self) -> Optional[str]:
-        """Recommended side for SHADOW/OVERTAKE: 'left', 'right', or None."""
-        return self._carver_side
-
-    def set_overtake_ready(self, ready: bool):
-        """External signal from carver's overtake_ready flag."""
-        self._overtake_ready_ext = ready
-
-    # ------------------------------------------------------------------
-    # Main entry
-    # ------------------------------------------------------------------
     def act(self, obs: TacticalObservation) -> TacticalAction:
+        """
+        Main entry.
+        """
         self.phase_time += self.dt
         if self.cooldown_time > 0.0:
             self.cooldown_time = max(0.0, self.cooldown_time - self.dt)
@@ -123,27 +98,29 @@ class HeuristicTacticalPolicy:
         # Generate action from phase
         if self.phase == "RACE":
             action = self._race_line_action(obs)
+
         elif self.phase == "CHASE":
             action = self._chase_action(obs, target)
-        elif self.phase == "FOLLOW":
-            action = self._follow_action(obs, target)
-        elif self.phase in ("SHADOW_LEFT", "PROBE_LEFT"):
-            action = self._shadow_action(obs, target, side="left")
-        elif self.phase in ("SHADOW_RIGHT", "PROBE_RIGHT"):
-            action = self._shadow_action(obs, target, side="right")
+
+        elif self.phase == "PROBE_LEFT":
+            action = self._probe_action(obs, target, side="left")
+
+        elif self.phase == "PROBE_RIGHT":
+            action = self._probe_action(obs, target, side="right")
+
         elif self.phase == "COMMIT_LEFT":
             action = self._commit_action(obs, target, side="left")
+
         elif self.phase == "COMMIT_RIGHT":
             action = self._commit_action(obs, target, side="right")
+
         elif self.phase == "ABORT":
             action = self._abort_action(obs, target)
+
         else:
             action = self._race_line_action(obs)
 
         self.last_target_gap = gap
-
-        # Update carver mode output
-        self._update_carver_mode()
 
         raw_action = action
         sanitized_action = self.safe_wrapper.sanitize(raw_action, obs)
@@ -158,123 +135,80 @@ class HeuristicTacticalPolicy:
             "cooldown_time": self.cooldown_time,
             "raw_tactic": raw_action.discrete_tactic.name,
             "safe_set": [t.name for t in safe_set],
-            "carver_mode": self._carver_mode_str,
-            "carver_side": self._carver_side,
-            "overtake_ready_ext": self._overtake_ready_ext,
         }
 
         return sanitized_action
 
     # ------------------------------------------------------------------
-    # Carver mode mapping
-    # ------------------------------------------------------------------
-    def _update_carver_mode(self):
-        """Map current FSM phase to recommended CarverMode."""
-        if self.phase in ("RACE", "CHASE"):
-            self._carver_mode_str = 'follow'
-            self._carver_side = None
-        elif self.phase == "FOLLOW":
-            self._carver_mode_str = 'follow'
-            self._carver_side = None
-        elif self.phase in ("SHADOW_LEFT", "PROBE_LEFT"):
-            self._carver_mode_str = 'shadow'
-            self._carver_side = 'left'
-        elif self.phase in ("SHADOW_RIGHT", "PROBE_RIGHT"):
-            self._carver_mode_str = 'shadow'
-            self._carver_side = 'right'
-        elif self.phase == "COMMIT_LEFT":
-            self._carver_mode_str = 'overtake'
-            self._carver_side = 'left'
-        elif self.phase == "COMMIT_RIGHT":
-            self._carver_mode_str = 'overtake'
-            self._carver_side = 'right'
-        elif self.phase == "ABORT":
-            self._carver_mode_str = 'follow'
-            self._carver_side = None
-        else:
-            self._carver_mode_str = 'follow'
-            self._carver_side = None
-
-    # ------------------------------------------------------------------
     # FSM update
     # ------------------------------------------------------------------
-    def _update_phase(self, obs: TacticalObservation, target, gap: float):
-        high_curve_shadow = obs.upcoming_max_curvature > self.curvature_shadow_limit
+
+    def _update_phase(self, obs: TacticalObservation, target, gap: float) -> None:
+        """
+        Update tactical phase using current observation and selected target.
+        """
+        # If no valid tactical maneuver should be attempted in current curvature,
+        # stay conservative unless already in commit.
+        high_curve_probe = obs.upcoming_max_curvature > self.curvature_probe_limit
         high_curve_commit = obs.upcoming_max_curvature > self.curvature_commit_limit
 
-        # If target too far, reset
+        # If target disappeared or too far, reset
         if gap > self.chase_enter_gap + 20.0:
             self._reset_to_race()
             return
 
-        # Hard abort for combative phases
-        if self.phase in ("SHADOW_LEFT", "SHADOW_RIGHT",
-                          "PROBE_LEFT", "PROBE_RIGHT",
-                          "COMMIT_LEFT", "COMMIT_RIGHT"):
+        # Hard abort conditions
+        if self.phase in ("PROBE_LEFT", "PROBE_RIGHT", "COMMIT_LEFT", "COMMIT_RIGHT"):
             if gap > self.abort_gap:
                 self._enter_abort()
                 return
 
-        # --- RACE ---
         if self.phase == "RACE":
             if gap < self.chase_enter_gap:
                 self._set_phase("CHASE")
             return
 
-        # --- CHASE ---
         if self.phase == "CHASE":
-            if gap < self.follow_enter_gap:
-                self._set_phase("FOLLOW")
-            return
-
-        # --- FOLLOW ---
-        if self.phase == "FOLLOW":
-            if self.phase_time < self.follow_min_hold:
-                return
-
             if self.cooldown_time > 0.0:
                 return
 
-            if high_curve_shadow:
+            if high_curve_probe:
                 return
 
-            # Transition to SHADOW when stable follow achieved and gap is close enough
-            if gap <= self.shadow_enter_gap:
+            if self.probe_enter_gap_lo <= gap <= self.probe_enter_gap_hi:
                 chosen_side = self._choose_probe_side(obs, target)
                 if chosen_side == "left":
                     self.locked_side = "left"
-                    self._set_phase("SHADOW_LEFT")
+                    self._set_phase("PROBE_LEFT")
                 elif chosen_side == "right":
                     self.locked_side = "right"
-                    self._set_phase("SHADOW_RIGHT")
+                    self._set_phase("PROBE_RIGHT")
             return
 
-        # --- SHADOW_LEFT ---
-        if self.phase in ("SHADOW_LEFT", "PROBE_LEFT"):
-            if self.phase_time < self.shadow_min_hold:
+        if self.phase == "PROBE_LEFT":
+            # hold the side for a minimum duration
+            if self.phase_time < self.probe_min_hold:
                 return
 
-            if self._should_abort_shadow(obs, target, side="left"):
+            if self._should_abort_probe(obs, target, side="left"):
                 self._enter_abort()
                 return
 
-            # Commit if overtake window detected (from carver or gap-based)
             if (not high_curve_commit) and self._should_commit(obs, target, side="left", gap=gap):
                 self._set_phase("COMMIT_LEFT")
                 return
 
-            # Side switch
+            # if left becomes bad and right becomes clearly better, allow side switch only after min hold
             if self._should_switch_side(obs, target, from_side="left"):
                 self.locked_side = "right"
-                self._set_phase("SHADOW_RIGHT")
+                self._set_phase("PROBE_RIGHT")
             return
 
-        # --- SHADOW_RIGHT ---
-        if self.phase in ("SHADOW_RIGHT", "PROBE_RIGHT"):
-            if self.phase_time < self.shadow_min_hold:
+        if self.phase == "PROBE_RIGHT":
+            if self.phase_time < self.probe_min_hold:
                 return
 
-            if self._should_abort_shadow(obs, target, side="right"):
+            if self._should_abort_probe(obs, target, side="right"):
                 self._enter_abort()
                 return
 
@@ -284,13 +218,14 @@ class HeuristicTacticalPolicy:
 
             if self._should_switch_side(obs, target, from_side="right"):
                 self.locked_side = "left"
-                self._set_phase("SHADOW_LEFT")
+                self._set_phase("PROBE_LEFT")
             return
 
-        # --- COMMIT ---
         if self.phase == "COMMIT_LEFT":
+            # once committed, do not back out too early unless it becomes clearly infeasible
             if self.phase_time < self.commit_min_hold:
                 return
+
             if self._should_abort_commit(obs, target, side="left"):
                 self._enter_abort()
             return
@@ -298,28 +233,27 @@ class HeuristicTacticalPolicy:
         if self.phase == "COMMIT_RIGHT":
             if self.phase_time < self.commit_min_hold:
                 return
+
             if self._should_abort_commit(obs, target, side="right"):
                 self._enter_abort()
             return
 
-        # --- ABORT ---
         if self.phase == "ABORT":
             if self.phase_time >= self.abort_hold:
                 self.cooldown_time = self.cooldown_hold
                 self.locked_side = None
-                # Return to FOLLOW instead of CHASE for smoother recovery
-                self._set_phase("FOLLOW")
+                self._set_phase("CHASE")
             return
 
-    def _set_phase(self, phase: str):
+    def _set_phase(self, phase: str) -> None:
         if phase != self.phase:
             self.phase = phase
             self.phase_time = 0.0
 
-    def _enter_abort(self):
+    def _enter_abort(self) -> None:
         self._set_phase("ABORT")
 
-    def _reset_to_race(self):
+    def _reset_to_race(self) -> None:
         self.phase = "RACE"
         self.phase_time = 0.0
         self.cooldown_time = 0.0
@@ -330,29 +264,45 @@ class HeuristicTacticalPolicy:
     # ------------------------------------------------------------------
     # Target / side selection
     # ------------------------------------------------------------------
+
     def _select_target(self, obs: TacticalObservation):
-        """Select nearest relevant opponent ahead (delta_s < 0 convention)."""
+        """
+        Select nearest relevant opponent ahead.
+        observation convention in current code:
+        - ahead opponents satisfy delta_s < 0
+        """
         ahead = [o for o in obs.opponents if o.delta_s < 0 and abs(o.delta_s) < 90.0]
         if not ahead:
             return None
+
+        # nearest ahead by |delta_s|
         ahead.sort(key=lambda o: abs(o.delta_s))
         return ahead[0]
 
     def _choose_probe_side(self, obs: TacticalObservation, target) -> Optional[str]:
+        """
+        Decide which side to probe. Keep previous locked side if still acceptable.
+        """
         if self.locked_side is not None:
             if self._side_is_reasonable(obs, target, self.locked_side):
                 return self.locked_side
 
         left_score, right_score = self._compute_side_scores(obs, target)
+
         if max(left_score, right_score) < 0.0:
             return None
         return "left" if left_score >= right_score else "right"
 
     def _compute_side_scores(self, obs: TacticalObservation, target):
+        """
+        A simple score balancing free room, opponent lateral position, and curvature.
+        """
         left_space = float(obs.w_left - obs.ego_n)
         right_space = float(abs(obs.w_right) + obs.ego_n)
         curve_penalty = 20.0 * float(obs.upcoming_max_curvature)
 
+        # If opponent already closer to one side, the opposite side is often better.
+        # target.n > ego.n means opponent more left of ego in Frenet sign convention
         opp_left_bias = 0.0
         opp_right_bias = 0.0
         if target.n > obs.ego_n + 0.5:
@@ -376,12 +326,12 @@ class HeuristicTacticalPolicy:
         )
         return left_score, right_score
 
-    def _side_is_reasonable(self, obs, target, side):
+    def _side_is_reasonable(self, obs: TacticalObservation, target, side: str) -> bool:
         left_score, right_score = self._compute_side_scores(obs, target)
         score = left_score if side == "left" else right_score
         return score > -0.2
 
-    def _should_switch_side(self, obs, target, from_side):
+    def _should_switch_side(self, obs: TacticalObservation, target, from_side: str) -> bool:
         left_score, right_score = self._compute_side_scores(obs, target)
         if from_side == "left":
             return right_score > left_score + 1.2
@@ -390,11 +340,11 @@ class HeuristicTacticalPolicy:
     # ------------------------------------------------------------------
     # Phase conditions
     # ------------------------------------------------------------------
-    def _should_commit(self, obs, target, side, gap):
-        # External carver signal takes priority
-        if self._overtake_ready_ext:
-            return True
 
+    def _should_commit(self, obs: TacticalObservation, target, side: str, gap: float) -> bool:
+        """
+        Commit when close enough and selected side remains open.
+        """
         if gap > self.commit_enter_gap:
             return False
 
@@ -406,14 +356,15 @@ class HeuristicTacticalPolicy:
         if free_space < self.cfg.overtake_min_corridor + 0.4:
             return False
 
+        # if we are too slow relative to target, do not commit yet
         dv = float(obs.ego_V - target.V)
         if dv < -2.0:
             return False
 
         return True
 
-    def _should_abort_shadow(self, obs, target, side):
-        if obs.upcoming_max_curvature > self.curvature_shadow_limit + 0.01:
+    def _should_abort_probe(self, obs: TacticalObservation, target, side: str) -> bool:
+        if obs.upcoming_max_curvature > self.curvature_probe_limit + 0.01:
             return True
 
         if side == "left":
@@ -426,7 +377,7 @@ class HeuristicTacticalPolicy:
 
         return False
 
-    def _should_abort_commit(self, obs, target, side):
+    def _should_abort_commit(self, obs: TacticalObservation, target, side: str) -> bool:
         if obs.upcoming_max_curvature > self.curvature_commit_limit + 0.015:
             return True
 
@@ -443,17 +394,27 @@ class HeuristicTacticalPolicy:
     # ------------------------------------------------------------------
     # Action generation
     # ------------------------------------------------------------------
-    def _race_line_action(self, obs):
+
+    def _race_line_action(self, obs: TacticalObservation) -> TacticalAction:
         return TacticalAction(
             discrete_tactic=DiscreteTactic.RACE_LINE,
             aggressiveness=1.0,
             preference=PreferenceVector(
-                rho_v=0.0, rho_n=0.0, rho_s=1.0, rho_w=1.0,
+                rho_v=0.0,
+                rho_n=0.0,
+                rho_s=1.0,
+                rho_w=1.0,
             ),
             p2p_trigger=False,
         )
 
-    def _chase_action(self, obs, target):
+    def _chase_action(self, obs: TacticalObservation, target) -> TacticalAction:
+        """
+        Aggressive closing-in behavior.
+        Important: this is NOT conservative follow.
+        """
+        # If the target is still far, stay centered and press forward.
+        # If already getting close, start slight bias toward chosen or preferred side.
         side = self.locked_side
         rho_n = 0.0
         if side == "left":
@@ -465,41 +426,41 @@ class HeuristicTacticalPolicy:
             discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
             aggressiveness=0.95,
             preference=PreferenceVector(
-                rho_v=0.16, rho_n=rho_n, rho_s=0.95, rho_w=1.25,
+                rho_v=0.16,
+                rho_n=rho_n,
+                rho_s=0.95,
+                rho_w=1.25,
             ),
             p2p_trigger=False,
         )
 
-    def _follow_action(self, obs, target):
-        """Stable car-following action. Conservative, centered."""
-        return TacticalAction(
-            discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
-            aggressiveness=0.80,
-            preference=PreferenceVector(
-                rho_v=0.05, rho_n=0.0, rho_s=1.05, rho_w=1.0,
-            ),
-            p2p_trigger=False,
-        )
-
-    def _shadow_action(self, obs, target, side):
-        """Side-threatening: maintain pressure on chosen side."""
+    def _probe_action(self, obs: TacticalObservation, target, side: str) -> TacticalAction:
+        """
+        Pull out and hold pressure. Not full commit yet.
+        """
         if side == "left":
             tactic = DiscreteTactic.PREPARE_OVERTAKE_LEFT
-            rho_n = 0.55
+            rho_n = 0.70
         else:
             tactic = DiscreteTactic.PREPARE_OVERTAKE_RIGHT
-            rho_n = -0.55
+            rho_n = -0.70
 
         return TacticalAction(
             discrete_tactic=tactic,
-            aggressiveness=0.88,
+            aggressiveness=0.92,
             preference=PreferenceVector(
-                rho_v=0.08, rho_n=rho_n, rho_s=0.95, rho_w=1.40,
+                rho_v=0.10,
+                rho_n=rho_n,
+                rho_s=0.95,
+                rho_w=1.55,
             ),
             p2p_trigger=False,
         )
 
-    def _commit_action(self, obs, target, side):
+    def _commit_action(self, obs: TacticalObservation, target, side: str) -> TacticalAction:
+        """
+        Full overtake execution.
+        """
         if side == "left":
             tactic = DiscreteTactic.OVERTAKE_LEFT
             rho_n = 1.15
@@ -510,6 +471,7 @@ class HeuristicTacticalPolicy:
         gap = abs(target.delta_s)
         dv = float(obs.ego_V - target.V)
 
+        # P2P only at commit phase, only if useful and allowed
         use_p2p = (
             obs.p2p_available
             and gap < 12.0
@@ -521,17 +483,26 @@ class HeuristicTacticalPolicy:
             discrete_tactic=tactic,
             aggressiveness=1.0,
             preference=PreferenceVector(
-                rho_v=0.18, rho_n=rho_n, rho_s=0.90, rho_w=1.70,
+                rho_v=0.18,
+                rho_n=rho_n,
+                rho_s=0.90,
+                rho_w=1.70,
             ),
             p2p_trigger=use_p2p,
         )
 
-    def _abort_action(self, obs, target):
+    def _abort_action(self, obs: TacticalObservation, target) -> TacticalAction:
+        """
+        Recentre and stabilize; do not immediately resume oscillating.
+        """
         return TacticalAction(
             discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
             aggressiveness=0.70,
             preference=PreferenceVector(
-                rho_v=0.00, rho_n=0.0, rho_s=1.10, rho_w=1.10,
+                rho_v=0.00,
+                rho_n=0.0,
+                rho_s=1.10,
+                rho_w=1.10,
             ),
             p2p_trigger=False,
         )
@@ -539,8 +510,16 @@ class HeuristicTacticalPolicy:
     # ------------------------------------------------------------------
     # Theory prior target helper
     # ------------------------------------------------------------------
-    def get_continuous_target(self, discrete_tactic, obs):
-        """Theory-guided continuous target for RL prior."""
+
+    def get_continuous_target(
+            self,
+            discrete_tactic: DiscreteTactic,
+            obs: TacticalObservation,
+    ) -> np.ndarray:
+        """
+        Theory-guided continuous target for RL prior.
+        Returns: [alpha, rho_v, rho_n, rho_s, rho_w]
+        """
         if discrete_tactic == DiscreteTactic.FOLLOW_CENTER:
             return np.array([0.85, 0.08, 0.0, 1.00, 1.15])
         elif discrete_tactic == DiscreteTactic.RACE_LINE:

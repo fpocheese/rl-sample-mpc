@@ -38,6 +38,7 @@ from opponent import OpponentVehicle
 from p2p import PushToPass
 from follow_module import FollowModule
 from sim_acados_only import load_setup, create_initial_state, perfect_tracking_update
+from a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
 
 
 def load_scenario(scenario_name: str) -> dict:
@@ -90,6 +91,9 @@ def run_tactical_simulation(
     safe_wrapper = SafeTacticalWrapper(cfg)
     tactical_mapper = TacticalToPlanner(track_handler, cfg)
     p2p = PushToPass(cfg)
+
+    # A2RL obstacle carver (v2: multi-mode)
+    a2rl_carver = A2RLObstacleCarver(track_handler, cfg)
 
     # Policy
     if policy_type == 'heuristic':
@@ -180,6 +184,10 @@ def run_tactical_simulation(
         # 2) Tactical action
         action = policy.act(obs)
 
+        # 2.5) Feed carver's overtake_ready back into policy (closed loop)
+        if hasattr(policy, 'set_overtake_ready'):
+            policy.set_overtake_ready(a2rl_carver.overtake_ready)
+
         # 3) Handle P2P
         if action.p2p_trigger and p2p.available:
             p2p.activate()
@@ -187,36 +195,62 @@ def run_tactical_simulation(
         else:
             action.p2p_trigger = p2p.active
 
-        # 4) Map to planner guidance
+        # 4) Map to planner guidance using BOTH tactical_mapper AND carver
+        #    tactical_mapper provides base guidance from action
         guidance = tactical_mapper.map(action, obs, N_stages=cfg.N_steps_acados)
 
-        # 4.5) Apply follow module ONLY for FOLLOW mode
-        if action.mode == TacticalMode.FOLLOW and opponents:
-            leader = follow_mod.find_nearest_car(ego_state['s'], opp_states)
-            if leader is not None:
-                follow_mods = follow_mod.get_follow_guidance_modifiers(ego_state, leader)
-                guidance.speed_scale = min(guidance.speed_scale, follow_mods['speed_scale'])
-                guidance.speed_cap = min(guidance.speed_cap, follow_mods['speed_cap'])
-                guidance.terminal_n_target = follow_mods['terminal_n_target']
-                guidance.safety_distance = max(guidance.safety_distance, follow_mods['safety_distance'])
-                guidance.follow_target_id = follow_mods['follow_target_id']
+        # 4.5) Apply carver-based feasible domain shaping
+        #    policy outputs carver_mode_str and carver_side
+        carver_mode_map = {
+            'follow': CarverMode.FOLLOW,
+            'shadow': CarverMode.SHADOW,
+            'overtake': CarverMode.OVERTAKE,
+        }
+        c_mode = carver_mode_map.get(
+            getattr(policy, 'carver_mode_str', 'follow'),
+            CarverMode.FOLLOW
+        )
+        c_side = getattr(policy, 'carver_side', None)
+
+        horizon_m = cfg.optimization_horizon_m
+        ds = horizon_m / cfg.N_steps_acados
+
+        carver_guidance = a2rl_carver.construct_guidance(
+            ego_state,
+            opp_states,
+            cfg.N_steps_acados,
+            ds,
+            mode=c_mode,
+            shadow_side=c_side,
+            overtake_side=c_side,
+            prev_trajectory=planner._prev_trajectory,
+        )
+
+        # Merge carver guidance into tactical guidance
+        # Carver overrides lateral bounds and can tighten speed
+        if carver_guidance.n_left_override is not None:
+            guidance.n_left_override = carver_guidance.n_left_override
+        if carver_guidance.n_right_override is not None:
+            guidance.n_right_override = carver_guidance.n_right_override
+        if carver_guidance.speed_cap < guidance.speed_cap:
+            guidance.speed_cap = carver_guidance.speed_cap
+        if carver_guidance.speed_scale < guidance.speed_scale:
+            guidance.speed_scale = carver_guidance.speed_scale
 
         # 5) Plan
         trajectory = planner.plan(ego_state, guidance)
 
-        # 5.5) Post-process FOLLOW only
-        if action.mode == TacticalMode.FOLLOW and opponents:
-            leader = follow_mod.find_nearest_car(ego_state['s'], opp_states)
-            if leader is not None:
-                trajectory = follow_mod.post_process_trajectory(trajectory, ego_state, leader)
+        # (follow post-processing removed -- carver handles speed/bounds)
 
         t_plan = time.time() - t_start
 
         # 6) Visualize
         if visualize:
+            carver_rdy = "OT_RDY!" if a2rl_carver.overtake_ready else ""
             tactical_info = (
                 f"Mode:  {action.discrete_tactic.name}\n"
                 f"Alpha: {action.aggressiveness:.2f}\n"
+                f"Carver: {c_mode.name} {c_side or ''} {carver_rdy}\n"
                 f"P2P:   {'ACTIVE' if p2p.active else 'avail' if p2p.available else 'used'}\n"
                 f"Horiz: {planner.current_horizon_m:.0f}m"
             )
@@ -255,7 +289,10 @@ def run_tactical_simulation(
             'raw_tactic': getattr(policy, 'debug_info', {}).get('raw_tactic', 'N/A'),
             'sanitized_tactic': action.discrete_tactic.name,
             'safe_set': getattr(policy, 'debug_info', {}).get('safe_set', []),
-            'follow_mod': action.mode == TacticalMode.FOLLOW and bool(opponents),
+            'follow_mod': False,  # deprecated: carver handles follow now
+            'carver_mode': c_mode.name,
+            'carver_side': c_side,
+            'overtake_ready': a2rl_carver.overtake_ready,
             'planner_ok': planner.planner_healthy,
             'used_fallback': getattr(planner, 'debug_log', {}).get('used_fallback', False),
             'term_n': guidance.terminal_n_target,
