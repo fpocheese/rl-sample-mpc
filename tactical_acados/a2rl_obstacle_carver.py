@@ -53,7 +53,7 @@ class A2RLObstacleCarver:
 
         # ---- common parameters ----
         self.opp_half_w         = 1.0     # half-width of opponent [m]
-        self.opp_clearance      = 1.35    # clearance to opponent (v1 sweet spot)
+        self.opp_clearance      = 1.6     # clearance to opponent (increased from 1.35)
         self.min_corridor       = 3.0     # minimum feasible corridor width
         self.smooth_kernel_size = 11      # v1 kernel: extreme smoothness
 
@@ -77,7 +77,7 @@ class A2RLObstacleCarver:
         # ---- SHADOW-specific ----
         self.shadow_lateral_offset = 2.0  # lateral offset toward shadow side [m]
         self.shadow_funnel_half = 3.0     # half-width of shadow corridor
-        self.shadow_gap_target  = 12.0    # tighter gap for pressure
+        self.shadow_gap_target  = 30.0    # start slowing from far out [m]
         self.shadow_V_margin    = 1.08    # slightly higher than follow
         self.shadow_ot_gap_thr  = 8.0     # overtake gap threshold
         self.shadow_ot_space    = 3.0     # overtake space threshold
@@ -361,11 +361,17 @@ class A2RLObstacleCarver:
 
         sign = 1.0 if shadow_side == 'left' else -1.0
 
-        # -- speed constraint: slightly more aggressive than follow --
+        # -- speed constraint: shadow must NOT crash into leader --
         if gap_current > 0:
-            if gap_current < self.follow_gap_min:
-                speed_cap = leader_V * 0.92
-                speed_scale = 0.80
+            if gap_current < 4.0:
+                # Very close: cap slightly below leader
+                speed_cap = leader_V * 0.85
+                speed_scale = 0.70
+            elif gap_current < self.follow_gap_min:
+                ratio = (gap_current - 4.0) / max(
+                    self.follow_gap_min - 4.0, 1.0)
+                speed_cap = leader_V * (0.85 + 0.07 * ratio)
+                speed_scale = 0.70 + 0.10 * ratio
             elif gap_current < self.shadow_gap_target:
                 ratio = (gap_current - self.follow_gap_min) / max(
                     self.shadow_gap_target - self.follow_gap_min, 1.0)

@@ -155,15 +155,22 @@ def run_carver_simulation(
 
         # 3) Determine mode
         if carver_mode == 'auto':
-            if nearest_gap > 40.0:
+            if nearest_gap > 50.0:
                 current_mode = CarverMode.FOLLOW
-            elif nearest_gap > 12.0:
+            elif nearest_gap > 20.0:
                 current_mode = CarverMode.SHADOW
-            else:
-                if a2rl_carver.overtake_ready or nearest_gap < 8.0:
+            elif nearest_gap > 10.0:
+                # Close range: only overtake if window detected
+                if a2rl_carver.overtake_ready:
                     current_mode = CarverMode.OVERTAKE
                 else:
                     current_mode = CarverMode.SHADOW
+            else:
+                # Very close: overtake or follow (not shadow)
+                if a2rl_carver.overtake_ready:
+                    current_mode = CarverMode.OVERTAKE
+                else:
+                    current_mode = CarverMode.FOLLOW
         else:
             current_mode = mode_map.get(carver_mode, CarverMode.OVERTAKE)
 
