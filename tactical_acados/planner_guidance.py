@@ -260,120 +260,110 @@ class TacticalToPlanner:
     ):
         """
         Compute per-stage corridor bounds [n_left, n_right].
+        Refined with v12 "Aggressive Ghost-Free" logic.
         """
         s_ego = obs.ego_s
         track_len = self.track_handler.s[-1]
 
-        # Base corridor from track bounds
+        # 1. Base corridor from track bounds
         s_ahead = np.linspace(s_ego, s_ego + self.cfg.optimization_horizon_m, N_stages)
         s_ahead_wrapped = s_ahead % track_len
 
-        w_left = np.interp(
-            s_ahead_wrapped, self.track_handler.s,
-            self.track_handler.w_tr_left, period=track_len
-        )
-        w_right = np.interp(
-            s_ahead_wrapped, self.track_handler.s,
-            self.track_handler.w_tr_right, period=track_len
-        )
+        # Legacy shrink constants (-0.7, +1.5)
+        w_l_base = np.interp(s_ahead_wrapped, self.track_handler.s, self.track_handler.w_tr_left, period=track_len) - 0.7
+        w_r_base = np.interp(s_ahead_wrapped, self.track_handler.s, self.track_handler.w_tr_right, period=track_len) + 1.5
 
-        veh_half = self.cfg.vehicle_width / 2.0
-        n_left = w_left - veh_half - 0.2
-        n_right = w_right + veh_half + 0.2
+        n_left = w_l_base.copy()
+        n_right = w_r_base.copy()
 
         if action.mode == TacticalMode.SOLO:
-            return n_left, n_right, {'min_corridor_width': 999.0, 'argmin_corridor_stage': 0, 'stage_s': s_ego}
+            return n_left, n_right, {'min_corridor_width': 999.0}
 
+        # v12 Tuning
+        opp_clearance = 1.35 
+        veh_half = self.cfg.vehicle_width / 2.0
+        min_corridor = 3.0      # safe physical width
+        draft_min_width = 7.0   # loose magnetic drafting
+        safety_s = 60.0         # long funnel influence
+
+        # 2. Carve for each opponent
         for opp in obs.opponents:
-            if opp.pred_s is None or opp.pred_n is None:
-                opp_s_pred = np.array(
-                    [opp.s + opp.V * t for t in np.linspace(0, 5.0, N_stages)]
-                ) % track_len
-                opp_n_pred = np.full(N_stages, opp.n)
-            else:
-                opp_s_pred = np.interp(
-                    np.linspace(0, 1, N_stages),
-                    np.linspace(0, 1, len(opp.pred_s)),
-                    opp.pred_s
-                )
-                opp_n_pred = np.interp(
-                    np.linspace(0, 1, N_stages),
-                    np.linspace(0, 1, len(opp.pred_n)),
-                    opp.pred_n
-                )
+            if opp.pred_s is None or opp.pred_n is None: continue
+            
+            # Interpolate opponent to N_stages (matching ego t_arr)
+            opp_s_pred = np.interp(np.linspace(0, 1, N_stages), np.linspace(0, 1, len(opp.pred_s)), opp.pred_s)
+            opp_n_pred = np.interp(np.linspace(0, 1, N_stages), np.linspace(0, 1, len(opp.pred_n)), opp.pred_n)
+
+            # Find closest gap to determine phase
+            dist_to_opp = (opp.s - s_ego)
+            if dist_to_opp > track_len/2: dist_to_opp -= track_len
+            elif dist_to_opp < -track_len/2: dist_to_opp += track_len
 
             for i in range(N_stages):
-                delta_s_stage = (s_ahead[i] - opp_s_pred[i])
-                if delta_s_stage > track_len / 2:
-                    delta_s_stage -= track_len
-                elif delta_s_stage < -track_len / 2:
-                    delta_s_stage += track_len
+                delta_s = (s_ahead[i] - opp_s_pred[i])
+                if delta_s > track_len / 2: delta_s -= track_len
+                elif delta_s < -track_len / 2: delta_s += track_len
+                ds_abs = abs(delta_s)
+                
+                if ds_abs >= safety_s: continue
 
-                dist = abs(delta_s_stage)
-                inflated_length = self.cfg.vehicle_length * 4.0
+                # v12 cos^3 Fade
+                fade = np.cos(ds_abs / safety_s * (np.pi / 2.0)) ** 3
+                if i < 15: fade *= (0.4 + 0.6 * (i/15.0)) # Startup ramp
+                excl_n = (veh_half + opp_clearance) * fade
+                opp_n = opp_n_pred[i]
 
-                if dist < inflated_length:
-                    ramp = np.cos((dist / inflated_length) * (np.pi / 2.0)) ** 2
-                    margin = (self.cfg.corridor_safety_margin + veh_half) * ramp
-                    opp_n = opp_n_pred[i]
+                # Blend: 1.0 (Follow/Bilateral) -> 0.0 (Overtake/Unilateral)
+                if action.mode == TacticalMode.FOLLOW:
+                    blend = 1.0; min_w_cur = draft_min_width
+                elif action.mode == TacticalMode.PREPARE_OVERTAKE:
+                    blend = 0.5; min_w_cur = (min_corridor + draft_min_width)/2.0
+                else: 
+                    blend = 0.0; min_w_cur = min_corridor
 
-                    if action.mode == TacticalMode.OVERTAKE:
-                        # strong side selection
-                        if action.lateral_intention == LateralIntention.LEFT:
-                            n_right[i] = max(n_right[i], opp_n + margin)
-                        elif action.lateral_intention == LateralIntention.RIGHT:
-                            n_left[i] = min(n_left[i], opp_n - margin)
+                # Pass-side hint (v12 aggressive 20%)
+                hint = 0.2
 
-                    elif action.mode == TacticalMode.PREPARE_OVERTAKE:
-                        # softer carving than full overtake
-                        if action.lateral_intention == LateralIntention.LEFT:
-                            n_right[i] = max(n_right[i], opp_n + margin * 0.35)
-                        elif action.lateral_intention == LateralIntention.RIGHT:
-                            n_left[i] = min(n_left[i], opp_n - margin * 0.35)
+                if action.lateral_intention == LateralIntention.LEFT:
+                    # Block Right
+                    new_r = opp_n + excl_n
+                    if new_r > n_right[i]: n_right[i] = min(new_r, n_left[i] - min_w_cur)
+                    # Pass Left (Subtle hint)
+                    new_l = opp_n - (excl_n * hint * blend)
+                    if new_l < n_left[i]: n_left[i] = new_l
+                elif action.lateral_intention == LateralIntention.RIGHT:
+                    # Block Left
+                    new_l = opp_n - excl_n
+                    if new_l < n_left[i]: n_left[i] = max(new_l, n_right[i] + min_w_cur)
+                    # Pass Right (Subtle hint)
+                    new_r = opp_n + (excl_n * hint * blend)
+                    if new_r > n_right[i]: n_right[i] = new_r
+                else:
+                    # CENTER / DEFAULT: Symmetric follow (v2 Magnetic style)
+                    new_l, new_r = opp_n - excl_n, opp_n + excl_n
+                    if new_l < n_left[i]: n_left[i] = new_l
+                    if new_r > n_right[i]: n_right[i] = new_r
 
-                    elif action.mode == TacticalMode.FOLLOW:
-                        # Funnel behind target - RELAXED to prevent infeasibility in curves
-                        tight_dist = self.cfg.vehicle_length * 2.5
-                        if dist < tight_dist:
-                            # Use a conservative but non-crashing margin (e.g. 2.0m side clearance)
-                            # instead of trying to squeeze the car into a 1.93m pipe
-                            relax_margin = 2.0 
-                            n_left[i] = min(n_left[i], opp_n + relax_margin)
-                            n_right[i] = max(n_right[i], opp_n - relax_margin)
+        # 3. v12 SPIKE-FREE SPATIAL SMOOTHING
+        k = 11
+        pad_l = np.pad(n_left, (k//2, k//2), mode='edge')
+        pad_r = np.pad(n_right, (k//2, k//2), mode='edge')
+        kernel = np.ones(k) / k
+        n_l_sm = np.convolve(pad_l, kernel, mode='valid')
+        n_r_sm = np.convolve(pad_r, kernel, mode='valid')
+        n_left[:N_stages] = n_l_sm[:N_stages]
+        n_right[:N_stages] = n_r_sm[:N_stages]
 
-                    elif action.mode == TacticalMode.DEFEND:
-                        # do not over-carve; defense is mainly a mild positional bias
-                        pass
-
-        # mild recenter / side encouragement using stage bias if available
-        bias = self._compute_stage_bias(action, obs, N_stages)
-        if action.mode == TacticalMode.PREPARE_OVERTAKE:
-            # open target side slightly, close opposite side slightly, but remain reversible
-            if action.lateral_intention == LateralIntention.LEFT:
-                n_right = n_right + 0.10 * np.maximum(bias, 0.0)
-            elif action.lateral_intention == LateralIntention.RIGHT:
-                n_left = n_left + 0.10 * np.minimum(bias, 0.0)
-
-        # Ensure corridor validity
-        min_corridor = veh_half * 2 + 0.5
+        # 4. Final Feasibility
         min_w = 999.0
-        min_w_stage = -1
-        
         for i in range(N_stages):
+            n_left[i] = min(n_left[i], w_l_base[i])
+            n_right[i] = max(n_right[i], w_r_base[i])
             w = n_left[i] - n_right[i]
-            if w < min_w:
-                min_w = w
-                min_w_stage = i
-
             if w < min_corridor:
                 center = (n_left[i] + n_right[i]) / 2.0
                 n_left[i] = center + min_corridor / 2.0
                 n_right[i] = center - min_corridor / 2.0
+            min_w = min(min_w, n_left[i] - n_right[i])
 
-        corridor_debug = {
-            'min_corridor_width': float(min_w),
-            'argmin_corridor_stage': int(min_w_stage),
-            'stage_s': float(s_ahead[min_w_stage]),
-        }
-
-        return n_left, n_right, corridor_debug
+        return n_left, n_right, {'min_corridor_width': float(min_w)}

@@ -37,17 +37,19 @@ class TacticalConfig:
 
     # ---- Reward weights ----
     w_prog: float = 1.0
-    w_race: float = 0.5
-    w_safe: float = 5.0
+    w_race: float = 1.2    # Increased (was 0.5)
+    w_safe: float = 3.5    # Decreased (was 5.0)
     w_term: float = 1.0
     w_ctrl: float = 0.3
     w_p2p: float = 0.2
+    w_push: float = 0.6    # New: Drafting reward
+    w_side: float = 1.0    # New: Side-by-side reward
 
     # ---- Safety penalties ----
-    collision_penalty: float = -100.0
+    collision_penalty: float = -150.0   # More severe (was -100)
     off_track_penalty: float = -50.0
-    unsafe_ttc_threshold: float = 1.0  # seconds
-    unsafe_gap_threshold: float = 3.0  # meters
+    unsafe_ttc_threshold: float = 0.8   # tighter (was 1.0)
+    unsafe_gap_threshold: float = 2.5   # tighter (was 3.0)
 
     # ---- P2P ----
     p2p_duration: float = 15.0           # seconds

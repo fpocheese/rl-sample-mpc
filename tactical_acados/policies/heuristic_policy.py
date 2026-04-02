@@ -353,6 +353,11 @@ class HeuristicTacticalPolicy:
         right_space = float(abs(obs.w_right) + obs.ego_n)
         curve_penalty = 20.0 * float(obs.upcoming_max_curvature)
 
+        # v12 Apex Bias: Favor the inside of the current turn
+        apex_bias = 1.2
+        left_apex_bonus = apex_bias if obs.curvature > 0.005 else 0.0
+        right_apex_bonus = apex_bias if obs.curvature < -0.005 else 0.0
+
         opp_left_bias = 0.0
         opp_right_bias = 0.0
         if target.n > obs.ego_n + 0.5:
@@ -367,12 +372,14 @@ class HeuristicTacticalPolicy:
             - self.cfg.overtake_min_corridor
             - curve_penalty
             + opp_left_bias
+            + left_apex_bonus
         )
         right_score = (
             right_space
             - self.cfg.overtake_min_corridor
             - curve_penalty
             + opp_right_bias
+            + right_apex_bonus
         )
         return left_score, right_score
 

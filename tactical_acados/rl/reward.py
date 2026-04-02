@@ -42,6 +42,9 @@ class RewardComputer:
         r_ctrl = self._control_reward(action, prev_action)
         r_p2p = self._p2p_reward(action, ego_state, ego_state_prev,
                                   opponents, p2p_active, track_handler)
+        
+        # v3 New: Tactical Pressure
+        r_push, r_side = self._tactical_pressure_rewards(ego_state, opponents, track_handler)
 
         total = (
             self.cfg.w_prog * r_prog +
@@ -49,7 +52,9 @@ class RewardComputer:
             self.cfg.w_safe * r_safe +
             self.cfg.w_term * r_term +
             self.cfg.w_ctrl * r_ctrl +
-            self.cfg.w_p2p * r_p2p
+            self.cfg.w_p2p * r_p2p +
+            getattr(self.cfg, 'w_push', 0.5) * r_push +
+            getattr(self.cfg, 'w_side', 0.8) * r_side
         )
 
         return {
@@ -60,6 +65,8 @@ class RewardComputer:
             'r_term': r_term,
             'r_ctrl': r_ctrl,
             'r_p2p': r_p2p,
+            'r_push': r_push,
+            'r_side': r_side,
         }
 
     def _progress_reward(self, state, prev_state, track_handler):
@@ -189,3 +196,30 @@ class RewardComputer:
             return 1.0 * (delta_s / 10.0)  # reward proportional to progress
         else:
             return -0.5  # penalty for wasting P2P in bad location
+
+    def _tactical_pressure_rewards(self, state, opponents, track_handler):
+        """Reward drafting and side-by-side positioning."""
+        r_push = 0.0
+        r_side = 0.0
+        if not opponents:
+            return 0.0, 0.0
+
+        track_len = track_handler.s[-1]
+        for opp in opponents:
+            delta_s = state['s'] - opp['s']
+            if delta_s > track_len / 2: delta_s -= track_len
+            elif delta_s < -track_len / 2: delta_s += track_len
+
+            # 1. Drafting/Pressure: Behind opponent, close gap
+            # Reward staying in the 5m-20m window behind
+            if -20.0 < delta_s < -2.0:
+                # Linear increase as we get closer (0.0 at 20m, 1.0 at 2m)
+                r_push += (1.0 - (abs(delta_s) - 2.0) / 18.0)
+
+            # 2. Side-by-Side: Overlapping or very close s, but distinct n
+            delta_n = state['n'] - opp['n']
+            if abs(delta_s) < 5.0 and abs(delta_n) > 2.0:
+                # Successfully pulled out and holding the line
+                r_side += 1.0
+
+        return r_push, r_side
