@@ -127,6 +127,8 @@ def run_carver_simulation(
     log_rows = []
     track_len = track_handler.s[-1]
     _overtake_locked = False   # v4: mode latch
+    _abort_shadow_side = None  # v4.1: when overtake aborts, remember shadow side
+    _abort_cooldown = 0        # v4.1: steps to wait before re-entering OVERTAKE
 
     print("=" * 70)
     print(f"Carver Simulation: {sc['name']}")
@@ -159,20 +161,47 @@ def run_carver_simulation(
             elif abs(g) < abs(raw_gap):
                 raw_gap = g
 
-        # 3) Determine mode  (v4: aggressive thresholds + overtake latch)
+        # 3) Determine mode  (v4.1: OVERTAKE abort → SHADOW with position-based side)
         if carver_mode == 'auto':
             ot_rdy = a2rl_carver.overtake_ready
+            current_mode = CarverMode.FOLLOW  # default, overwritten below
+            if _abort_cooldown > 0:
+                _abort_cooldown -= 1
             if _overtake_locked:
-                if nearest_gap > 25.0 or raw_gap < -5.0:
+                # Condition 1: passed opponent or gave up
+                abort = (nearest_gap > 25.0 or raw_gap < -5.0)
+                # Condition 2: very close and lateral gap still not safe for passing
+                if not abort and nearest_gap < 10.0:
+                    # find nearest-ahead opp lateral position
+                    for os_dict in opp_states:
+                        g = os_dict['s'] - ego_state['s']
+                        if g > track_len / 2: g -= track_len
+                        elif g < -track_len / 2: g += track_len
+                        if abs(g - nearest_gap) < 1.0:
+                            dn = abs(ego_state['n'] - os_dict['n'])
+                            if dn < cfg.vehicle_width + 0.5:
+                                abort = True
+                                print(f"  [OT_ABORT_SAFETY] gap={nearest_gap:.1f} "
+                                      f"dn={dn:.2f} < {cfg.vehicle_width+1.0:.2f}")
+                            break
+                if abort:
                     _overtake_locked = False
+                    _abort_shadow_side = a2rl_carver.overtake_abort_side(
+                        ego_state, opp_states)
+                    _abort_cooldown = 40  # ~5 seconds cooldown before retry
+                    current_mode = CarverMode.SHADOW
+                    print(f"  [OT_ABORT] step={step} → SHADOW {_abort_shadow_side} "
+                          f"(gap={nearest_gap:.1f})")
                 else:
                     current_mode = CarverMode.OVERTAKE
-            if not _overtake_locked:
-                if nearest_gap <= 15.0 and ot_rdy:
+            if not _overtake_locked and current_mode != CarverMode.SHADOW:
+                if nearest_gap <= 15.0 and ot_rdy and _abort_cooldown == 0:
                     current_mode = CarverMode.OVERTAKE
                     _overtake_locked = True
+                    _abort_shadow_side = None
                 elif nearest_gap > 30.0:
                     current_mode = CarverMode.FOLLOW
+                    _abort_shadow_side = None
                 elif nearest_gap > 15.0:
                     current_mode = CarverMode.SHADOW
                 else:
@@ -182,12 +211,16 @@ def run_carver_simulation(
 
         mode_label = current_mode.name
 
-        # 4) Build guidance  (v4: let carver decide side in auto mode)
+        # 4) Build guidance  (v4.1: pass abort_shadow_side when retreating)
         horizon_m = cfg.optimization_horizon_m
         ds = horizon_m / cfg.N_steps_acados
 
-        _shadow_side = None if carver_mode == 'auto' else shadow_side
-        _overtake_side = None if carver_mode == 'auto' else overtake_side
+        if carver_mode == 'auto':
+            _shadow_side = _abort_shadow_side   # None → carver decides; set → forced
+            _overtake_side = None
+        else:
+            _shadow_side = shadow_side
+            _overtake_side = overtake_side
 
         guidance = a2rl_carver.construct_guidance(
             ego_state, opp_states, cfg.N_steps_acados, ds,

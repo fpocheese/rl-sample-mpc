@@ -96,7 +96,7 @@ class A2RLObstacleCarver:
 
         # SHADOW (pull-out: side-rear)
         self.shadow_gap_target  = 10.0
-        self.shadow_lateral_offset = 2.5
+        self.shadow_lateral_offset = 3.5
         self.shadow_funnel_half = 2.5
         self.shadow_ot_gap_thr  = 18.0   # early overtake trigger
         self.shadow_ot_space    = 2.5
@@ -324,8 +324,6 @@ class A2RLObstacleCarver:
             speed_cap = float(np.clip(speed_cmd,
                                       getattr(self.cfg, 'V_min', 5.0),
                                       self.V_max))
-            if gap_current < self.follow_gap_min:
-                speed_cap = min(speed_cap, leader_V * 0.85)
         else:
             speed_cap = self.V_max
 
@@ -369,8 +367,6 @@ class A2RLObstacleCarver:
             speed_cap = float(np.clip(speed_cmd,
                                       getattr(self.cfg, 'V_min', 5.0),
                                       self.V_max))
-            if gap_current < self.follow_gap_min:
-                speed_cap = min(speed_cap, leader_V * 0.85)
         else:
             speed_cap = self.V_max
 
@@ -483,6 +479,21 @@ class A2RLObstacleCarver:
             return self._shadow_side
         return self._decide_shadow_side(ego_state, opp_states)
 
+    def overtake_abort_side(self, ego_state, opp_states):
+        """When overtake fails, pick shadow side from ego's current position.
+
+        If ego is currently left of opp → shadow left.
+        If ego is currently right of opp → shadow right.
+        This ensures smooth path transition (no sudden side swap).
+        """
+        target = self._find_target(ego_state, opp_states)
+        if target is None:
+            # Opp already behind → use overtake side we were on
+            return self._overtake_side or self._shadow_side or 'left'
+        ego_n = ego_state.get('n', 0.0)
+        opp_n = target.get('n', 0.0)
+        return 'left' if ego_n >= opp_n else 'right'
+
     # ==================================================================
     # v1 side selection (for multi-car overtake)
     # ==================================================================
@@ -531,6 +542,9 @@ class A2RLObstacleCarver:
             return False
         dV = ego_state['V'] - target.get('V', 30.0)
         if dV < -15.0:
+            return False
+        # If ego much faster than opp, closing too fast → not safe to overtake
+        if dV > 30.0:
             return False
         return True
 
