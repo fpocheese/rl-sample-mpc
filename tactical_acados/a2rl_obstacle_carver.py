@@ -69,16 +69,16 @@ class A2RLObstacleCarver:
         self.hint_intensity     = 0.2     # subtle pass-side hint
 
         # ---- FOLLOW-specific ----
-        self.follow_funnel_half = 3.5     # half-width of follow corridor at peak
-        self.follow_gap_target  = 15.0    # desired following gap [m]
-        self.follow_gap_min     = 6.0     # min safe gap [m]
+        self.follow_funnel_half = 1.5     # tight half-width at peak → lock behind leader
+        self.follow_gap_target  = 10.0    # desired following gap [m]
+        self.follow_gap_min     = 3.0     # min safe gap [m]
         self.follow_V_margin    = 1.05    # speed cap = leader_V * margin
 
         # ---- SHADOW-specific ----
         self.shadow_lateral_offset = 2.0  # lateral offset toward shadow side [m]
-        self.shadow_funnel_half = 3.0     # half-width of shadow corridor
-        self.shadow_gap_target  = 30.0    # start slowing from far out [m]
-        self.shadow_V_margin    = 1.08    # slightly higher than follow
+        self.shadow_funnel_half = 2.5     # half-width of shadow corridor
+        self.shadow_gap_target  = 25.0    # start slowing earlier (approach faster than follow)
+        self.shadow_V_margin    = 1.10    # allow faster approach
         self.shadow_ot_gap_thr  = 8.0     # overtake gap threshold
         self.shadow_ot_space    = 3.0     # overtake space threshold
 
@@ -298,25 +298,32 @@ class A2RLObstacleCarver:
         opp_s_traj, opp_n_traj = self._predict_opp(target, t_arr, max_v_node)
         gap_current = self._signed_gap(target['s'], ego_state['s'])
 
-        # -- speed constraint: smooth approach --
+        # -- speed constraint: cap only, never reduce speed_scale --
+        speed_scale = 1.0  # NEVER restrict ACADOS optimization freedom
+        ego_V = ego_state.get('V', 30.0)
         if gap_current > 0:
             if gap_current < self.follow_gap_min:
-                speed_cap = leader_V * 0.90
-                speed_scale = 0.75
+                speed_cap = leader_V * 0.88
             elif gap_current < self.follow_gap_target:
                 ratio = (gap_current - self.follow_gap_min) / max(
                     self.follow_gap_target - self.follow_gap_min, 1.0)
-                speed_cap = leader_V * (0.90 + 0.15 * ratio)
-                speed_scale = 0.75 + 0.25 * ratio
+                speed_cap = leader_V * (0.88 + 0.17 * ratio)
             else:
                 speed_cap = leader_V * self.follow_V_margin
-                speed_scale = 1.0
+            # ---- closing-speed guard: prevent rear-ending at braking zones ----
+            closing_speed = ego_V - leader_V
+            if closing_speed > 3.0 and gap_current < 30.0:
+                ttc = gap_current / closing_speed
+                if ttc < 1.5:
+                    speed_cap = min(speed_cap, leader_V * 0.88)
+                elif ttc < 3.5:
+                    blend = (ttc - 1.5) / 2.0
+                    speed_cap = min(speed_cap, leader_V * (0.88 + 0.17 * blend))
         else:
             speed_cap = self.V_max
-            speed_scale = 1.0
         speed_cap = max(speed_cap, getattr(self.cfg, 'V_min', 5.0))
 
-        # -- lateral funnel: cosine fade converges corridor toward leader n --
+        # -- lateral funnel: converge corridor CENTER to leader_n (正后方跟踪) --
         for i in range(max_v_node):
             opp_s_pred = opp_s_traj[i]
             opp_n_pred = opp_n_traj[i]
@@ -331,10 +338,9 @@ class A2RLObstacleCarver:
             fade = self._cosine_fade(ds_abs, self.safety_s)
             fade *= self._startup_ramp(i)
 
-            # Corridor converges toward leader n position
-            # At fade=1 (closest to opp): corridor = leader_n +/- follow_funnel_half
-            # At fade=0 (far away): corridor = full track width
-            corridor_half = self.follow_funnel_half + (1.0 - fade) * 8.0
+            # Tight funnel: near opp → corridor_half = follow_funnel_half (1.5m)
+            # Far from opp → corridor_half expands to 6m (gentle widening)
+            corridor_half = self.follow_funnel_half + (1.0 - fade) * 5.0
 
             target_left = opp_n_pred + corridor_half
             target_right = opp_n_pred - corridor_half
@@ -361,28 +367,36 @@ class A2RLObstacleCarver:
 
         sign = 1.0 if shadow_side == 'left' else -1.0
 
-        # -- speed constraint: shadow must NOT crash into leader --
+        # -- speed constraint: cap only, speed_scale always 1.0 --
+        speed_scale = 1.0  # NEVER restrict ACADOS optimization freedom
+        ego_V = ego_state.get('V', 30.0)
         if gap_current > 0:
-            if gap_current < 4.0:
-                # Very close: cap slightly below leader
+            # ---- base cap from gap distance ----
+            if gap_current < self.follow_gap_min:
                 speed_cap = leader_V * 0.85
-                speed_scale = 0.70
-            elif gap_current < self.follow_gap_min:
-                ratio = (gap_current - 4.0) / max(
-                    self.follow_gap_min - 4.0, 1.0)
-                speed_cap = leader_V * (0.85 + 0.07 * ratio)
-                speed_scale = 0.70 + 0.10 * ratio
+            elif gap_current < 10.0:
+                ratio = (gap_current - self.follow_gap_min) / max(10.0 - self.follow_gap_min, 1.0)
+                speed_cap = leader_V * (0.85 + 0.10 * ratio)
             elif gap_current < self.shadow_gap_target:
-                ratio = (gap_current - self.follow_gap_min) / max(
-                    self.shadow_gap_target - self.follow_gap_min, 1.0)
-                speed_cap = leader_V * (0.92 + 0.16 * ratio)
-                speed_scale = 0.80 + 0.20 * ratio
+                ratio = (gap_current - 10.0) / max(
+                    self.shadow_gap_target - 10.0, 1.0)
+                speed_cap = leader_V * (0.95 + 0.15 * ratio)
             else:
                 speed_cap = leader_V * self.shadow_V_margin
-                speed_scale = 1.0
+            # ---- closing-speed guard: if ego is much faster, cap harder ----
+            closing_speed = ego_V - leader_V
+            if closing_speed > 5.0 and gap_current < 40.0:
+                # Time-to-collision estimate
+                ttc = gap_current / closing_speed
+                if ttc < 2.0:
+                    # Urgent: match leader speed immediately
+                    speed_cap = min(speed_cap, leader_V * 0.95)
+                elif ttc < 4.0:
+                    # Moderate: start slowing to leader speed
+                    blend = (ttc - 2.0) / 2.0  # 0 at ttc=2, 1 at ttc=4
+                    speed_cap = min(speed_cap, leader_V * (0.95 + 0.15 * blend))
         else:
             speed_cap = self.V_max
-            speed_scale = 1.0
         speed_cap = max(speed_cap, getattr(self.cfg, 'V_min', 5.0))
 
         # -- lateral funnel: cosine fade with lateral offset --
@@ -405,7 +419,7 @@ class A2RLObstacleCarver:
             corridor_center = opp_n_pred + offset
 
             # Asymmetric corridor: wider on shadow side
-            corridor_half = self.shadow_funnel_half + (1.0 - fade) * 7.0
+            corridor_half = self.shadow_funnel_half + (1.0 - fade) * 5.0
 
             if shadow_side == 'left':
                 target_left = corridor_center + corridor_half * 1.2

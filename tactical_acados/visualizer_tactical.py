@@ -17,7 +17,8 @@ class TacticalVisualizer:
     """Real-time visualization for the tactical ACADOS simulation."""
 
     def __init__(self, track_handler, gg_handler, params,
-                 zoom_on_ego=True, zoom_margin=30.0, n_opponents=0):
+                 zoom_on_ego=True, zoom_margin=30.0, n_opponents=0,
+                 global_planner=None):
         self.track_handler = track_handler
         self.gg_handler = gg_handler
         self.params = params
@@ -39,6 +40,21 @@ class TacticalVisualizer:
         left, right = track_handler.get_track_bounds()
         self.ax_track.plot(left[0], left[1], 'k', linewidth=1.5)
         self.ax_track.plot(right[0], right[1], 'k', linewidth=1.5)
+
+        # Offline raceline (light color, always visible as reference)
+        self._raceline_xy = None
+        if global_planner is not None:
+            try:
+                rl_s = global_planner.s_offline_rl
+                rl_n = global_planner.n_offline_rl
+                rl_xyz = track_handler.sn2cartesian(rl_s, rl_n)
+                if rl_xyz.ndim == 2:
+                    self._raceline_xy = rl_xyz[:, :2]
+                    self.ax_track.plot(rl_xyz[:, 0], rl_xyz[:, 1],
+                                      color='orchid', linewidth=1.2, alpha=0.5,
+                                      linestyle='--', label='Offline Raceline')
+            except Exception:
+                pass  # silently skip if conversion fails
 
         self.traj_line, = self.ax_track.plot([], [], 'b-', linewidth=2,
                                               label='Trajectory')

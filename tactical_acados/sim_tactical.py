@@ -144,7 +144,8 @@ def run_tactical_simulation(
         from visualizer_tactical import TacticalVisualizer
         viz = TacticalVisualizer(
             track_handler, gg_handler, params,
-            n_opponents=len(opponents)
+            n_opponents=len(opponents),
+            global_planner=global_planner
         )
 
     prev_action = get_fallback_action()

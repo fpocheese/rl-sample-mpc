@@ -1,19 +1,13 @@
 """
-Carver-only simulation (no decision layer).
+1-vs-1 Duel Simulation — single opponent, all carver modes.
 
-Lock a single CarverMode and run complete scenario with CSV data export.
-
-Supported locked modes:
-  'follow'   : force FOLLOW (stable car-following funnel)
-  'shadow'   : force SHADOW (side-threatening funnel)
-  'overtake' : force OVERTAKE (v1 aggressive pass)
-  'raceline' : force RACELINE (converge to global raceline)
-  'auto'     : gap-based auto switching
+Simplified from the 3-car tactical sim for cleaner 1v1 training & demos.
 
 Usage:
-  python sim_attack_acados_only.py                    # default: auto
-  python sim_attack_acados_only.py --mode follow
-  python sim_attack_acados_only.py --mode raceline --no-viz
+  python sim_dual.py                                # auto mode, duel_a, with viz
+  python sim_dual.py --mode follow --scenario duel_b
+  python sim_dual.py --mode shadow --shadow-side left --no-viz
+  python sim_dual.py --mode raceline --no-viz
 """
 
 import os
@@ -23,10 +17,11 @@ import csv
 import numpy as np
 import yaml
 
-# Path setup
+# Path setup — reuse tactical_acados + src modules
 dir_path = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(dir_path, '..')
 sys.path.insert(0, os.path.join(project_root, 'src'))
+sys.path.insert(0, os.path.join(project_root, 'tactical_acados'))
 sys.path.insert(0, dir_path)
 
 from config import TacticalConfig
@@ -42,15 +37,15 @@ def load_scenario(scenario_name: str) -> dict:
         return yaml.safe_load(f)
 
 
-def run_carver_simulation(
-        scenario_name='scenario_a',
+def run_duel(
+        scenario_name='duel_a',
         max_steps=999999,
         visualize=True,
         carver_mode='auto',
         shadow_side='left',
         overtake_side=None,
 ):
-    """Run locked-mode carver simulation with full data recording."""
+    """Run 1v1 duel simulation with full data recording."""
 
     from a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
 
@@ -61,8 +56,10 @@ def run_carver_simulation(
     opp_cfgs = scenario.get('opponents', [])
     planner_cfg = scenario.get('planner', {})
 
+    assert len(opp_cfgs) == 1, f"Duel requires exactly 1 opponent, got {len(opp_cfgs)}"
+
     cfg = TacticalConfig()
-    cfg.optimization_horizon_m = planner_cfg.get('optimization_horizon_m', 500.0)
+    cfg.optimization_horizon_m = planner_cfg.get('optimization_horizon_m', 300.0)
     cfg.gg_margin = planner_cfg.get('gg_margin', 0.1)
     cfg.safety_distance_default = planner_cfg.get('safety_distance', 0.5)
     cfg.assumed_calc_time = planner_cfg.get('assumed_calc_time', 0.125)
@@ -82,7 +79,7 @@ def run_carver_simulation(
         cfg=cfg,
     )
 
-    # Carver with global_planner (needed for RACELINE mode)
+    # Carver
     a2rl_carver = A2RLObstacleCarver(track_handler, cfg, global_planner=global_planner)
 
     ego_state = create_initial_state(
@@ -95,27 +92,24 @@ def run_carver_simulation(
         start_ay=ego_cfg.get('start_ay', 0.0),
     )
 
-    opponents = []
-    for opp_cfg in opp_cfgs:
-        opp = OpponentVehicle(
-            vehicle_id=opp_cfg['id'],
-            s_init=opp_cfg['start_s'],
-            n_init=opp_cfg.get('start_n', 0.0),
-            V_init=opp_cfg.get('start_V', 40.0),
-            track_handler=track_handler,
-            global_planner=global_planner,
-            speed_scale=opp_cfg.get('speed_scale', 0.85),
-            cfg=cfg,
-        )
-        opponents.append(opp)
+    opp_cfg = opp_cfgs[0]
+    opponent = OpponentVehicle(
+        vehicle_id=opp_cfg['id'],
+        s_init=opp_cfg['start_s'],
+        n_init=opp_cfg.get('start_n', 0.0),
+        V_init=opp_cfg.get('start_V', 40.0),
+        track_handler=track_handler,
+        global_planner=global_planner,
+        speed_scale=opp_cfg.get('speed_scale', 0.85),
+        cfg=cfg,
+    )
 
     if visualize:
         from visualizer_tactical import TacticalVisualizer
         viz = TacticalVisualizer(track_handler, gg_handler, params,
-                                 n_opponents=len(opponents),
+                                 n_opponents=1,
                                  global_planner=global_planner)
 
-    # Mode string -> CarverMode mapping
     mode_map = {
         'follow': CarverMode.FOLLOW,
         'shadow': CarverMode.SHADOW,
@@ -123,51 +117,47 @@ def run_carver_simulation(
         'raceline': CarverMode.RACELINE,
     }
 
-    # Logging
     log_rows = []
     track_len = track_handler.s[-1]
 
     print("=" * 70)
-    print(f"Carver Simulation: {sc['name']}")
-    print(f"  Mode: {carver_mode.upper()}, Opponents: {len(opponents)}")
-    print(f"  Ego s={ego_cfg['start_s']}, Max steps: {max_steps}")
+    print(f"1v1 Duel: {sc['name']}")
+    print(f"  Mode: {carver_mode.upper()}")
+    print(f"  Ego s={ego_cfg['start_s']}, Opp s={opp_cfg['start_s']} "
+          f"(gap={opp_cfg['start_s'] - ego_cfg['start_s']:.0f}m)")
     print("=" * 70)
 
     for step in range(max_steps):
         t_start = time.time()
 
-        # 1) Opponent states
-        opp_predictions = [opp.predict() for opp in opponents]
-        opp_states = [opp.get_state() for opp in opponents]
-        for os_dict, pred in zip(opp_states, opp_predictions):
-            os_dict['pred_s'] = pred['pred_s']
-            os_dict['pred_n'] = pred['pred_n']
+        # 1) Opponent prediction
+        opp_pred = opponent.predict()
+        opp_state = opponent.get_state()
+        opp_state['pred_s'] = opp_pred['pred_s']
+        opp_state['pred_n'] = opp_pred['pred_n']
+        opp_states = [opp_state]
 
-        # 2) Compute gap
-        nearest_gap = 999.0
-        nearest_opp_V = 0.0
-        for os_dict in opp_states:
-            g = os_dict['s'] - ego_state['s']
-            if g > track_len / 2: g -= track_len
-            elif g < -track_len / 2: g += track_len
-            if 0 < g < nearest_gap:
-                nearest_gap = g
-                nearest_opp_V = os_dict.get('V', 0.0)
+        # 2) Gap
+        gap = opp_state['s'] - ego_state['s']
+        if gap > track_len / 2:
+            gap -= track_len
+        elif gap < -track_len / 2:
+            gap += track_len
+        nearest_gap = gap if gap > 0 else 999.0
+        opp_V = opp_state.get('V', 0.0)
 
-        # 3) Determine mode
+        # 3) Mode selection
         if carver_mode == 'auto':
             if nearest_gap > 50.0:
                 current_mode = CarverMode.FOLLOW
             elif nearest_gap > 20.0:
                 current_mode = CarverMode.SHADOW
             elif nearest_gap > 10.0:
-                # Close range: only overtake if window detected
                 if a2rl_carver.overtake_ready:
                     current_mode = CarverMode.OVERTAKE
                 else:
                     current_mode = CarverMode.SHADOW
             else:
-                # Very close: overtake or follow (not shadow)
                 if a2rl_carver.overtake_ready:
                     current_mode = CarverMode.OVERTAKE
                 else:
@@ -177,7 +167,7 @@ def run_carver_simulation(
 
         mode_label = current_mode.name
 
-        # 4) Build guidance
+        # 4) Guidance
         horizon_m = cfg.optimization_horizon_m
         ds = horizon_m / cfg.N_steps_acados
 
@@ -193,37 +183,35 @@ def run_carver_simulation(
         trajectory = planner.plan(ego_state, guidance)
         t_plan = time.time() - t_start
 
-        # 6) Visualize
+        # 6) Viz
         if visualize:
             rdy = "YES" if a2rl_carver.overtake_ready else "no"
             tactical_info = (
                 f"Mode: {mode_label}\n"
                 f"Gap: {nearest_gap:.1f}m\n"
                 f"OT_Ready: {rdy}\n"
-                f"Carver v3"
+                f"1v1 Duel"
             )
             viz.update(ego_state, trajectory,
-                       opponents=opp_predictions,
+                       opponents=[opp_pred],
                        tactical_info=tactical_info,
                        guidance=guidance)
 
-        # 7) Move opponents
-        for opp in opponents:
-            opp.step(cfg.assumed_calc_time, ego_state)
+        # 7) Move opponent
+        opponent.step(cfg.assumed_calc_time, ego_state)
 
-        # 8) Perfect tracking
+        # 8) Tracking
         ego_state = perfect_tracking_update(
             ego_state, trajectory, cfg.assumed_calc_time, track_handler)
 
-        # 9) Collision check
-        collision = False
-        for opp in opponents:
-            dist = np.sqrt((ego_state['x'] - opp.x)**2 + (ego_state['y'] - opp.y)**2)
-            if dist < cfg.vehicle_length * 0.5:
-                collision = True
-                print(f"\n*** COLLISION at step {step}! ***")
+        # 9) Collision
+        dist = np.sqrt((ego_state['x'] - opponent.x)**2
+                       + (ego_state['y'] - opponent.y)**2)
+        collision = dist < cfg.vehicle_length * 0.5
+        if collision:
+            print(f"\n*** COLLISION at step {step}! ***")
 
-        # 10) Log row
+        # 10) Log
         log_rows.append({
             'step': step,
             's': ego_state['s'],
@@ -234,7 +222,9 @@ def run_carver_simulation(
             'ay': ego_state['ay'],
             'mode': mode_label,
             'gap': nearest_gap,
-            'opp_V': nearest_opp_V,
+            'opp_V': opp_V,
+            'opp_s': opp_state['s'],
+            'opp_n': opp_state['n'],
             'speed_cap': guidance.speed_cap,
             'speed_scale': guidance.speed_scale,
             'planner_ok': planner.planner_healthy,
@@ -249,11 +239,10 @@ def run_carver_simulation(
             break
 
         if step % 20 == 0:
-            opp_info = " | ".join([f"Opp{o.vehicle_id}: s={o.s:.0f}" for o in opponents])
             rdy_str = " OT_RDY!" if a2rl_carver.overtake_ready else ""
             print(f"[{step:4d}] s={ego_state['s']:7.1f} n={ego_state['n']:5.2f} "
                   f"V={ego_state['V']:5.1f} | {mode_label:10s} gap={nearest_gap:5.1f}"
-                  f"{rdy_str} | {opp_info} | "
+                  f"{rdy_str} | Opp: s={opponent.s:.0f} V={opp_V:.1f} | "
                   f"{t_plan*1000:.0f}ms")
 
     # Summary
@@ -266,8 +255,8 @@ def run_carver_simulation(
     print(f"Done: {n_total} steps, planner OK {rate:.1f}%, collisions {n_col}")
     print(f"{'='*70}")
 
-    # Export CSV
-    csv_name = f"log_{carver_mode}_{scenario_name}.csv"
+    # CSV
+    csv_name = f"log_duel_{carver_mode}_{scenario_name}.csv"
     csv_path = os.path.join(dir_path, csv_name)
     if log_rows:
         keys = log_rows[0].keys()
@@ -282,23 +271,21 @@ def run_carver_simulation(
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Carver-Only Simulation')
-    parser.add_argument('--scenario', type=str, default='scenario_a',
-                        help='scenario_a, scenario_b, scenario_c')
+    parser = argparse.ArgumentParser(description='1v1 Duel Simulation')
+    parser.add_argument('--scenario', type=str, default='duel_a',
+                        help='duel_a, duel_b, duel_c')
     parser.add_argument('--mode', type=str, default='auto',
                         choices=['auto', 'follow', 'shadow', 'overtake', 'raceline'],
                         help='Locked carver mode')
     parser.add_argument('--shadow-side', type=str, default='left',
-                        choices=['left', 'right'], help='Shadow side')
+                        choices=['left', 'right'])
     parser.add_argument('--overtake-side', type=str, default=None,
-                        choices=['left', 'right', None], help='Overtake side')
-    parser.add_argument('--max-steps', type=int, default=99999,
-                        help='Maximum simulation steps')
-    parser.add_argument('--no-viz', action='store_true',
-                        help='Disable visualization')
+                        choices=['left', 'right', None])
+    parser.add_argument('--max-steps', type=int, default=99999)
+    parser.add_argument('--no-viz', action='store_true')
     args = parser.parse_args()
 
-    run_carver_simulation(
+    run_duel(
         scenario_name=args.scenario,
         max_steps=args.max_steps,
         visualize=not args.no_viz,
