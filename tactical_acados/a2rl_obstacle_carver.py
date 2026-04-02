@@ -1,14 +1,15 @@
 """
-A2RL Obstacle Carver v10.3 — "The Perfect Carver"
+A2RL Obstacle Carver v11.4 — "Smoothly Committed"
 
-Refined logic based on v2 legacy feel + modern stability + hard overtake fix:
-  1. FOLLOW PHASE (>20m): Bilateral squeeze (funnel). Squeezes BOTH boundaries 
-     towards the opponent. This creates the "follow behind" feel from v2 (62cca36).
-  2. PASS PHASE (<20m): Transitions to PURE ASYMMETRIC. The passing side 
-     boundary is restored to base track width, while the blocked side remains pushed.
-     This enables the "Hard Overtake" by giving ACADOS full track resolution.
-  3. COMMITMENT LATCH: Once <15m, the side choice is LOCKED until passed.
-  4. MATH FIX: Ensures boundaries only move "inward" (w_left decreases, w_right increases).
+Refined for Overtake Speed, Safety, and Decisiveness:
+  1. DRAFTING (>15m): Magnetic bilateral squeeze. Centers the car in a 6.0m
+     wide slipstream. Provides the 'nice funnel' look while closing the gap.
+  2. SMOOTH POP-OUT (10m - 15m): Linear transition from Bilateral Drafting
+     to Unilateral Passing. Prevents sudden 'brutal' shifts that cause collisions.
+  3. PASSING (<10m): Decisive unilateral block. Pass-side is wide open to
+     base track, block-side is fully pushed.
+  4. SAFETY: Increased clearance to 1.5m and min corridor to 3.0m to ensure
+     clean side-by-side completion.
 """
 
 import numpy as np
@@ -21,17 +22,21 @@ class A2RLObstacleCarver:
         self.cfg = cfg
 
         # Parameters
-        self.opp_safety_s = 60.0     # longitudinal influence [m]
-        self.opp_clearance_n = 1.3   # lateral clearance [m]
+        self.opp_safety_s = 60.0    
+        self.opp_clearance_n = 1.5   # increased for side-by-side safety
         self.opp_half_w = 2.0 / 2.0
-        self.min_corridor = 2.8
+        self.min_corridor = 3.0      # increased for vehicle room
+        self.draft_min_width = 6.0   
         self.A2RL_V_max = 80.0
         self.smooth_kernel_size = 9
 
-        # Commitment state
+        # Distances
+        self._latch_dist = 25.0      
+        self._fade_start = 15.0      # pop-out begins
+        self._fade_end = 10.0        # pop-out complete
+
+        # Persistence
         self._prev_side = {}
-        self._committed = {}
-        self._hysteresis_margin = 1.5
 
     def construct_guidance(self, ego_state, opp_states, N_stages, ds, prev_trajectory=None):
         guidance = PlannerGuidance()
@@ -40,13 +45,13 @@ class A2RLObstacleCarver:
         track_len = self.track_handler.s[-1]
         s_arr = np.array([ego_state['s'] + i * ds for i in range(N_stages)])
         s_wrapped = s_arr % track_len
-        w_left_base = (np.interp(s_wrapped, self.track_handler.s, self.track_handler.w_tr_left, period=track_len) - 0.7)
-        w_right_base = (np.interp(s_wrapped, self.track_handler.s, self.track_handler.w_tr_right, period=track_len) + 1.5)
+        w_l_base = (np.interp(s_wrapped, self.track_handler.s, self.track_handler.w_tr_left, period=track_len) - 0.7)
+        w_r_base = (np.interp(s_wrapped, self.track_handler.s, self.track_handler.w_tr_right, period=track_len) + 1.5)
 
-        w_left = w_left_base.copy()
-        w_right = w_right_base.copy()
+        w_left = w_l_base.copy()
+        w_right = w_r_base.copy()
 
-        # ── 2. Arrival time estimation ──
+        # ── 2. Time estimation ──
         if prev_trajectory is not None and len(prev_trajectory.get('t', [])) == N_stages:
             t_arr = np.array(prev_trajectory['t'])
         else:
@@ -56,10 +61,7 @@ class A2RLObstacleCarver:
         max_valid_node = N_stages
         for i in range(N_stages):
             if t_arr[i] > self.cfg.planning_horizon:
-                max_valid_node = i
-                break
-
-        min_forward_gap = 999.0
+                max_valid_node = i; break
 
         # ── 3. Per-opponent carving ──
         for opp_idx, opp in enumerate(opp_states):
@@ -70,68 +72,65 @@ class A2RLObstacleCarver:
             opp_s_nodes = np.interp(t_arr[:max_valid_node], t_opp, opp_s_traj)
             opp_n_nodes = np.interp(t_arr[:max_valid_node], t_opp, opp_n_traj)
 
-            closest_node = -1
-            closest_gap = 999.0
+            closest_node = -1; closest_gap = 999.0
             for i in range(max_valid_node):
                 gap = (opp_s_nodes[i] - s_arr[i])
                 if gap > track_len/2: gap -= track_len
                 if gap < -track_len/2: gap += track_len
-                if gap < -5.0: continue
-                if abs(gap) < closest_gap:
-                    closest_gap = abs(gap); closest_node = i
+                if gap < -4.0: continue
+                if abs(gap) < closest_gap: closest_gap = abs(gap); closest_node = i
 
             if closest_node < 0 or closest_gap > self.opp_safety_s:
-                self._prev_side.pop(opp_idx, None); self._committed.pop(opp_idx, None)
-                continue
-            if closest_gap < min_forward_gap: min_forward_gap = closest_gap
+                self._prev_side.pop(opp_idx, None); continue
 
-            # ── 3a. Side Decision with Latch ──
-            if self._committed.get(opp_idx, False):
+            # Side decision
+            opp_n_ref = opp_n_nodes[closest_node]
+            space_l = w_l_base[closest_node] - (opp_n_ref + self.opp_half_w)
+            space_r = (opp_n_ref - self.opp_half_w) - w_r_base[closest_node]
+            natural_side = 'left' if space_l >= space_r else 'right'
+            if closest_gap < self._latch_dist and opp_idx in self._prev_side:
                 chosen_side = self._prev_side[opp_idx]
             else:
-                opp_n_ref = opp_n_nodes[closest_node]
-                space_l = w_left_base[closest_node] - (opp_n_ref + self.opp_half_w)
-                space_r = (opp_n_ref - self.opp_half_w) - w_right_base[closest_node]
-                natural_side = 'left' if space_l >= space_r else 'right'
-                prev_side = self._prev_side.get(opp_idx, None)
-                if prev_side:
-                    curr_s = space_l if prev_side == 'left' else space_r
-                    oth_s = space_r if prev_side == 'left' else space_l
-                    chosen_side = natural_side if (oth_s - curr_s) > self._hysteresis_margin else prev_side
-                else: chosen_side = natural_side
-                if closest_gap < 15.0: self._committed[opp_idx] = True
-                self._prev_side[opp_idx] = chosen_side
+                chosen_side = natural_side
+            self._prev_side[opp_idx] = chosen_side
 
-            # ── 3b. 3-Phase Carving Logic ──
+            # 3-Phase logic
             for i in range(max_valid_node):
                 ds_raw = (opp_s_nodes[i] - s_arr[i])
                 if ds_raw > track_len/2: ds_raw -= track_len
                 if ds_raw < -track_len/2: ds_raw += track_len
-                if ds_raw < -5.0: continue
+                if ds_raw < -4.0: continue
                 ds_abs = abs(ds_raw)
                 if ds_abs >= self.opp_safety_s: continue
 
+                # Longitudinal Fade
                 fade = np.cos(ds_abs / self.opp_safety_s * (np.pi / 2.0)) ** 3
                 if i < 15: fade *= (0.4 + 0.6 * (i/15.0))
                 excl_n = (self.opp_half_w + self.opp_clearance_n) * fade
                 opp_n = opp_n_nodes[i]
 
-                # Phase Blend: 1.0 = Bilateral Follow (>20m), 0.0 = Asymmetric Pass (<20m)
-                pass_blend = max(0.0, min(1.0, (ds_abs - 15.0) / 10.0))
+                # Blend: 1.0 (Bilateral) -> 0.0 (Unilateral)
+                if ds_abs > self._fade_start:
+                    blend = 1.0; min_w_cur = self.draft_min_width
+                elif ds_abs > self._fade_end:
+                    blend = (ds_abs - self._fade_end) / (self._fade_start - self._fade_end)
+                    min_w_cur = self.min_corridor + blend * (self.draft_min_width - self.min_corridor)
+                else:
+                    blend = 0.0; min_w_cur = self.min_corridor
 
                 if chosen_side == 'left':
-                    # Always push right boundary inwards (increase w_right)
+                    # Always push right inward
                     new_r = opp_n + excl_n
-                    if new_r > w_right[i]: w_right[i] = min(new_r, w_left[i] - self.min_corridor)
-                    # Push left boundary inwards (decrease w_left) ONLY in follow-phase
-                    new_l = opp_n - (excl_n * pass_blend * 0.7) # 70% intensity for look
+                    if new_r > w_right[i]: w_right[i] = min(new_r, w_left[i] - min_w_cur)
+                    # Push left inward only if blending
+                    new_l = opp_n - (excl_n * blend)
                     if new_l < w_left[i]: w_left[i] = new_l
                 else:
-                    # Always push left boundary inwards (decrease w_left)
+                    # Always push left inward
                     new_l = opp_n - excl_n
-                    if new_l < w_left[i]: w_left[i] = max(new_l, w_right[i] + self.min_corridor)
-                    # Push right boundary inwards (increase w_right) ONLY in follow-phase
-                    new_r = opp_n + (excl_n * pass_blend * 0.7)
+                    if new_l < w_left[i]: w_left[i] = max(new_l, w_right[i] + min_w_cur)
+                    # Push right inward only if blending
+                    new_r = opp_n + (excl_n * blend)
                     if new_r > w_right[i]: w_right[i] = new_r
 
         # ── 4. Spatial Smoothing & Clamping ──
@@ -144,15 +143,14 @@ class A2RLObstacleCarver:
                 w_left[i] = w_l_sm[i]; w_right[i] = w_r_sm[i]
 
         for i in range(N_stages):
-            w_left[i] = min(w_left[i], w_left_base[i])
-            w_right[i] = max(w_right[i], w_right_base[i])
+            w_left[i] = min(w_left[i], w_l_base[i])
+            w_right[i] = max(w_right[i], w_r_base[i])
             width = w_left[i] - w_right[i]
             if width < self.min_corridor:
                 center = (w_left[i] + w_right[i]) / 2.0
                 w_left[i] = center + self.min_corridor / 2.0
                 w_right[i] = center - self.min_corridor / 2.0
 
-        guidance.n_left_override = w_left
-        guidance.n_right_override = w_right
+        guidance.n_left_override = w_left; guidance.n_right_override = w_right
         guidance.terminal_V_guess = -1.0; guidance.speed_scale = 1.0; guidance.speed_cap = self.A2RL_V_max
         return guidance
