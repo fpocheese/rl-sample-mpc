@@ -1,21 +1,23 @@
 """
-A2RL Obstacle Carver v5 — "Stable Funnel with Hysteresis"
+A2RL Obstacle Carver v8.1 — "Hybrid Funnel → Commit"
 
-v4 issues:
-  - Side decision flipped every frame → rapid left/right oscillation ("head-shaking")
-  - No funnel-shaped corridor transition — felt like abrupt side-blocking instead of
-    gradual channel formation as in the original C++ design
+Merges the best of both approaches:
+  - BILATERAL PUSH-AWAY at distance (>12m): Both boundaries squeeze symmetrically
+    around the opponent. This creates the natural "funnel" feel — the car lines up
+    behind the opponent and follows it smoothly.
+  - UNILATERAL COMMITMENT when close (<12m): One side opens for overtaking while
+    the other side continues to push. The side is chosen by available space with
+    hysteresis to prevent oscillation.
 
-v5 key innovations:
-  1. SIDE DECISION HYSTERESIS: Remember previous side choice per opponent. Only switch
-     sides if the alternative is significantly wider (>2m more room). This prevents
-     oscillation and creates temporally consistent corridors.
-  2. FUNNEL-SHAPED CORRIDOR: The corridor narrows gradually with a cos^2 spatial profile.
-     Far ahead: full track width. Approaching opponent: one side smoothly closes.
-     Passing opponent: that side smoothly reopens. Creates the classic "funnel" shape.
-  3. Spatial smoothing preserved from v4.
-  4. Strict prediction horizon enforcement preserved.
-  5. Forward-looking speed management for safe approach.
+This two-phase approach gives both the "following/funnel" feel AND actual overtaking.
+
+Stability features:
+  1. Strict temporal cutoff (3.75s) → no ghost obstacles
+  2. Forward-only carving (opponents behind are ignored)
+  3. 7-node spatial smoothing for clean constraint surfaces
+  4. Min corridor guarantee (2.5m)
+  5. Boundary clamping (never exceed base track)
+  6. Speed management when gap < 5m
 """
 
 import numpy as np
@@ -29,19 +31,22 @@ class A2RLObstacleCarver:
 
         # Safety parameters
         self.opp_safety_s = 15.0     # longitudinal influence zone [m]
-        self.opp_clearance_n = 1.5   # lateral clearance from opponent edge [m]
+        self.opp_clearance_n = 1.2   # lateral clearance from opponent edge [m]
         self.opp_half_w = 2.0 / 2.0  # opponent half-width [m]
         self.min_corridor = 2.5      # minimum viable corridor width [m]
         self.A2RL_V_max = 80.0       # speed cap [m/s]
-        self.smooth_kernel_size = 7  # spatial smoothing window (nodes)
+        self.smooth_kernel_size = 7  # spatial smoothing window
 
-        # Hysteresis state: maps opponent index → 'left' or 'right'
+        # Phase transition threshold
+        self.commit_distance = 12.0   # [m] switch from bilateral to unilateral
+
+        # Hysteresis state
         self._prev_side = {}
-        self._hysteresis_margin = 2.0  # [m] extra room needed to flip sides
+        self._hysteresis_margin = 2.0
 
     def construct_guidance(self, ego_state, opp_states, N_stages, ds, prev_trajectory=None):
         """
-        Build corridor with funnel-shaped transitions and hysteresis-stabilized side selection.
+        Hybrid funnel: bilateral squeeze at distance → unilateral commit for the pass.
         """
         guidance = PlannerGuidance()
 
@@ -65,19 +70,19 @@ class A2RLObstacleCarver:
             V_est = max(ego_state['V'], 8.0)
             t_arr = np.array([i * ds / V_est for i in range(N_stages)])
 
-        # Last valid prediction node
+        # Strict temporal cutoff
         max_valid_node = N_stages
         for i in range(N_stages):
             if t_arr[i] > self.cfg.planning_horizon:
                 max_valid_node = i
                 break
 
-        # ── 3. Speed limiting tracker ──
+        # ── 3. Speed tracking ──
         min_forward_gap = 999.0
 
-        # ── 4. Funnel carving with hysteresis ──
+        # ── 4. Per-opponent carving ──
         for opp_idx, opp in enumerate(opp_states):
-            if 'pred_s' not in opp or len(opp['pred_s']) == 0:
+            if 'pred_s' not in opp or len(opp['pred_s']) < 2:
                 continue
 
             opp_s_traj = np.array(opp['pred_s'])
@@ -89,37 +94,32 @@ class A2RLObstacleCarver:
 
             # ── 4a. Find closest approach for side decision ──
             closest_node = -1
-            closest_ds = 999.0
+            closest_gap = 999.0
             for i in range(max_valid_node):
-                ds_raw = (opp_s_nodes[i] % track_len) - (s_arr[i] % track_len)
-                if ds_raw > track_len * 0.5: ds_raw -= track_len
-                if ds_raw < -track_len * 0.5: ds_raw += track_len
-                if ds_raw < -3.0:
+                gap = (opp_s_nodes[i] - s_arr[i])
+                if gap > track_len / 2: gap -= track_len
+                if gap < -track_len / 2: gap += track_len
+                if gap < -3.0:
                     continue
-                if abs(ds_raw) < closest_ds:
-                    closest_ds = abs(ds_raw)
+                if abs(gap) < closest_gap:
+                    closest_gap = abs(gap)
                     closest_node = i
 
-            if closest_node < 0 or closest_ds > self.opp_safety_s * 2.5:
-                # Opponent too far, clear hysteresis
+            if closest_node < 0 or closest_gap > self.opp_safety_s * 2:
                 self._prev_side.pop(opp_idx, None)
                 continue
 
-            if closest_ds < min_forward_gap:
-                min_forward_gap = closest_ds
+            if closest_gap < min_forward_gap:
+                min_forward_gap = closest_gap
 
-            # ── 4b. Side decision with HYSTERESIS ──
+            # ── 4b. Side decision (for commit phase) with hysteresis ──
             opp_n_ref = opp_n_nodes[closest_node]
             space_left = w_left[closest_node] - (opp_n_ref + self.opp_half_w)
             space_right = (opp_n_ref - self.opp_half_w) - w_right[closest_node]
 
-            # Default: pick wider side
             natural_side = 'left' if space_left >= space_right else 'right'
-
-            # Check hysteresis: stick to previous decision unless alternative is much better
             prev_side = self._prev_side.get(opp_idx, None)
             if prev_side is not None:
-                # Only flip if the OTHER side has significantly more room
                 if prev_side == 'left':
                     should_flip = (space_right - space_left) > self._hysteresis_margin
                 else:
@@ -127,14 +127,14 @@ class A2RLObstacleCarver:
                 chosen_side = natural_side if should_flip else prev_side
             else:
                 chosen_side = natural_side
-
             self._prev_side[opp_idx] = chosen_side
 
-            # ── 4c. Apply FUNNEL-shaped corridor carving ──
+            # ── 4c. HYBRID carving: bilateral far, unilateral close ──
             for i in range(max_valid_node):
-                ds_raw = (opp_s_nodes[i] % track_len) - (s_arr[i] % track_len)
+                ds_raw = (opp_s_nodes[i] - s_arr[i])
                 if ds_raw > track_len * 0.5: ds_raw -= track_len
                 if ds_raw < -track_len * 0.5: ds_raw += track_len
+
                 if ds_raw < -3.0:
                     continue
 
@@ -142,65 +142,70 @@ class A2RLObstacleCarver:
                 if ds_abs >= self.opp_safety_s:
                     continue
 
-                # FUNNEL PROFILE: cos^2 fade creates smooth narrowing
-                #   At ds_abs=0: full exclusion (tightest)
-                #   At ds_abs=opp_safety_s: zero exclusion (full track)
+                # cos^2 longitudinal fade
                 fade = np.cos(ds_abs / self.opp_safety_s * (np.pi / 2.0)) ** 2
-
-                excl_half = (self.opp_half_w + self.opp_clearance_n) * fade
+                excl_n = (self.opp_half_w + self.opp_clearance_n) * fade
                 opp_n = opp_n_nodes[i]
 
+                # Blend factor: 1.0 = fully bilateral, 0.0 = fully unilateral
+                if ds_abs <= self.commit_distance:
+                    # Close: gradually transition to unilateral
+                    blend = ds_abs / self.commit_distance  # 0 at contact, 1 at commit_distance
+                else:
+                    # Far: fully bilateral
+                    blend = 1.0
+
                 if chosen_side == 'left':
-                    # Ego passes LEFT → push w_right up (close right side)
-                    new_right = opp_n + excl_half
+                    # PASS LEFT: always push right boundary; blend left boundary
+                    new_right = opp_n + excl_n
                     if new_right > w_right[i]:
-                        # Cap to preserve minimum corridor
                         max_right = w_left[i] - self.min_corridor
                         w_right[i] = min(new_right, max_right)
-                        w_right[i] = max(w_right[i], w_right_base[i])  # never tighter than base
+                        w_right[i] = max(w_right[i], w_right_base[i])
+
+                    # Bilateral component: push left boundary too (with blend)
+                    new_left = opp_n - excl_n * blend
+                    if new_left < w_left[i]:
+                        w_left[i] = new_left
                 else:
-                    # Ego passes RIGHT → push w_left down (close left side)
-                    new_left = opp_n - excl_half
+                    # PASS RIGHT: always push left boundary; blend right boundary
+                    new_left = opp_n - excl_n
                     if new_left < w_left[i]:
                         min_left = w_right[i] + self.min_corridor
                         w_left[i] = max(new_left, min_left)
                         w_left[i] = min(w_left[i], w_left_base[i])
 
-        # ── 5. Spatial smoothing (moving average) ──
+                    # Bilateral component: push right boundary too (with blend)
+                    new_right = opp_n + excl_n * blend
+                    if new_right > w_right[i]:
+                        w_right[i] = new_right
+
+        # ── 5. Spatial smoothing ──
         k = self.smooth_kernel_size
         if k > 1 and N_stages > k:
             kernel = np.ones(k) / k
-            w_left_smooth = np.convolve(w_left, kernel, mode='same')
-            w_right_smooth = np.convolve(w_right, kernel, mode='same')
-            # Keep first 2 nodes exact (current state), smooth the rest
+            w_left_sm = np.convolve(w_left, kernel, mode='same')
+            w_right_sm = np.convolve(w_right, kernel, mode='same')
             for i in range(2, N_stages):
-                w_left[i] = w_left_smooth[i]
-                w_right[i] = w_right_smooth[i]
+                w_left[i] = w_left_sm[i]
+                w_right[i] = w_right_sm[i]
 
-        # ── 6. Final feasibility guarantee ──
+        # ── 6. Feasibility guarantee + boundary clamping ──
         for i in range(N_stages):
+            w_left[i] = min(w_left[i], w_left_base[i])
+            w_right[i] = max(w_right[i], w_right_base[i])
             width = w_left[i] - w_right[i]
             if width < self.min_corridor:
                 center = (w_left[i] + w_right[i]) / 2.0
                 w_left[i] = center + self.min_corridor / 2.0
                 w_right[i] = center - self.min_corridor / 2.0
-            # Never exceed base track bounds
-            w_left[i] = min(w_left[i], w_left_base[i])
-            w_right[i] = max(w_right[i], w_right_base[i])
 
-        # ── 7. Speed limiting for forward approach ──
+        # ── 7. Speed management ──
         speed_cap = self.A2RL_V_max
-        if min_forward_gap < 8.0:
-            opp_speeds = [opp.get('V', 40.0) for opp in opp_states
-                          if 'pred_s' in opp and 'V' in opp]
-            if opp_speeds:
-                min_opp_V = min(opp_speeds)
-                if min_forward_gap < 3.0:
-                    speed_cap = min(speed_cap, min_opp_V + 2.0)
-                else:
-                    blend = (min_forward_gap - 3.0) / 5.0
-                    cap_close = min_opp_V + 2.0
-                    speed_cap = min(speed_cap, cap_close + blend * (self.A2RL_V_max - cap_close))
+        if min_forward_gap < 3.0:
+            opp_Vs = [opp.get('V', 40.0) for opp in opp_states if 'pred_s' in opp]
+            if opp_Vs:
+                speed_cap = min(speed_cap, min(opp_Vs) + 5.0)
 
         # ── 8. Set guidance ──
         guidance.n_left_override = w_left
