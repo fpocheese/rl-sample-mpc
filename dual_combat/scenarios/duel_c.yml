@@ -1,26 +1,26 @@
-# Duel C: 1v1 tight start — immediate pressure
+# Duel C: 1v1 full track — complete race loop (s=0~3005)
 scenario:
-  name: "1v1 Duel C - Tight Start"
+  name: "1v1 Duel C - Full Track"
   track_name: "yas_user_smoothed"
   vehicle_name: "eav25_car"
   raceline_name: "yasnorth_3d_rl_as_ref_eav25_car_gg_0.1"
-  s_start: 50.0
-  s_end: 1700.0
+  s_start: 0.0
+  s_end: 3005.0
 
 ego:
   start_s: 50.0
-  start_n: -1.0
-  start_V: 48.0
+  start_n: 0.0
+  start_V: 50.0
   start_chi: 0.0
   start_ax: 0.0
   start_ay: 0.0
 
 opponents:
   - id: 1
-    start_s: 65.0
-    start_n: 0.5
-    start_V: 40.0
-    speed_scale: 0.82
+    start_s: 90.0
+    start_n: 0.0
+    start_V: 42.0
+    speed_scale: 0.85
 
 planner:
   optimization_horizon_m: 300.0

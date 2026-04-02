@@ -126,6 +126,7 @@ def run_carver_simulation(
     # Logging
     log_rows = []
     track_len = track_handler.s[-1]
+    _overtake_locked = False   # v4: mode latch
 
     print("=" * 70)
     print(f"Carver Simulation: {sc['name']}")
@@ -146,6 +147,7 @@ def run_carver_simulation(
         # 2) Compute gap
         nearest_gap = 999.0
         nearest_opp_V = 0.0
+        raw_gap = 999.0  # signed gap to nearest ahead
         for os_dict in opp_states:
             g = os_dict['s'] - ego_state['s']
             if g > track_len / 2: g -= track_len
@@ -153,39 +155,45 @@ def run_carver_simulation(
             if 0 < g < nearest_gap:
                 nearest_gap = g
                 nearest_opp_V = os_dict.get('V', 0.0)
+                raw_gap = g
+            elif abs(g) < abs(raw_gap):
+                raw_gap = g
 
-        # 3) Determine mode
+        # 3) Determine mode  (v4: aggressive thresholds + overtake latch)
         if carver_mode == 'auto':
-            if nearest_gap > 50.0:
-                current_mode = CarverMode.FOLLOW
-            elif nearest_gap > 20.0:
-                current_mode = CarverMode.SHADOW
-            elif nearest_gap > 10.0:
-                # Close range: only overtake if window detected
-                if a2rl_carver.overtake_ready:
+            ot_rdy = a2rl_carver.overtake_ready
+            if _overtake_locked:
+                if nearest_gap > 25.0 or raw_gap < -5.0:
+                    _overtake_locked = False
+                else:
                     current_mode = CarverMode.OVERTAKE
+            if not _overtake_locked:
+                if nearest_gap <= 15.0 and ot_rdy:
+                    current_mode = CarverMode.OVERTAKE
+                    _overtake_locked = True
+                elif nearest_gap > 30.0:
+                    current_mode = CarverMode.FOLLOW
+                elif nearest_gap > 15.0:
+                    current_mode = CarverMode.SHADOW
                 else:
                     current_mode = CarverMode.SHADOW
-            else:
-                # Very close: overtake or follow (not shadow)
-                if a2rl_carver.overtake_ready:
-                    current_mode = CarverMode.OVERTAKE
-                else:
-                    current_mode = CarverMode.FOLLOW
         else:
             current_mode = mode_map.get(carver_mode, CarverMode.OVERTAKE)
 
         mode_label = current_mode.name
 
-        # 4) Build guidance
+        # 4) Build guidance  (v4: let carver decide side in auto mode)
         horizon_m = cfg.optimization_horizon_m
         ds = horizon_m / cfg.N_steps_acados
+
+        _shadow_side = None if carver_mode == 'auto' else shadow_side
+        _overtake_side = None if carver_mode == 'auto' else overtake_side
 
         guidance = a2rl_carver.construct_guidance(
             ego_state, opp_states, cfg.N_steps_acados, ds,
             mode=current_mode,
-            shadow_side=shadow_side,
-            overtake_side=overtake_side,
+            shadow_side=_shadow_side,
+            overtake_side=_overtake_side,
             prev_trajectory=planner._prev_trajectory,
         )
 
@@ -199,8 +207,8 @@ def run_carver_simulation(
             tactical_info = (
                 f"Mode: {mode_label}\n"
                 f"Gap: {nearest_gap:.1f}m\n"
-                f"OT_Ready: {rdy}\n"
-                f"Carver v3"
+                f"OT_Ready: {rdy}  Side: {a2rl_carver.current_shadow_side}\n"
+                f"Carver v4 PID"
             )
             viz.update(ego_state, trajectory,
                        opponents=opp_predictions,
@@ -215,13 +223,18 @@ def run_carver_simulation(
         ego_state = perfect_tracking_update(
             ego_state, trajectory, cfg.assumed_calc_time, track_handler)
 
-        # 9) Collision check
+        # 9) Collision check  (v4: s-gap based, box overlap)
         collision = False
         for opp in opponents:
-            dist = np.sqrt((ego_state['x'] - opp.x)**2 + (ego_state['y'] - opp.y)**2)
-            if dist < cfg.vehicle_length * 0.5:
+            delta_s = ego_state['s'] - opp.s
+            if delta_s > track_len / 2:
+                delta_s -= track_len
+            elif delta_s < -track_len / 2:
+                delta_s += track_len
+            delta_n = abs(ego_state['n'] - opp.n)
+            if abs(delta_s) < cfg.vehicle_length and delta_n < cfg.vehicle_width:
                 collision = True
-                print(f"\n*** COLLISION at step {step}! ***")
+                print(f"\n*** COLLISION at step {step}! ds={delta_s:.2f} dn={delta_n:.2f} ***")
 
         # 10) Log row
         log_rows.append({
@@ -283,7 +296,7 @@ def run_carver_simulation(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Carver-Only Simulation')
-    parser.add_argument('--scenario', type=str, default='scenario_a',
+    parser.add_argument('--scenario', type=str, default='scenario_c',
                         help='scenario_a, scenario_b, scenario_c')
     parser.add_argument('--mode', type=str, default='auto',
                         choices=['auto', 'follow', 'shadow', 'overtake', 'raceline'],

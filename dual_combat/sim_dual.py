@@ -119,6 +119,7 @@ def run_duel(
 
     log_rows = []
     track_len = track_handler.s[-1]
+    _overtake_locked = False   # v4: mode latch — stay in OVERTAKE until done
 
     print("=" * 70)
     print(f"1v1 Duel: {sc['name']}")
@@ -146,36 +147,42 @@ def run_duel(
         nearest_gap = gap if gap > 0 else 999.0
         opp_V = opp_state.get('V', 0.0)
 
-        # 3) Mode selection
+        # 3) Mode selection  (v4: aggressive thresholds + overtake latch)
         if carver_mode == 'auto':
-            if nearest_gap > 50.0:
-                current_mode = CarverMode.FOLLOW
-            elif nearest_gap > 20.0:
-                current_mode = CarverMode.SHADOW
-            elif nearest_gap > 10.0:
-                if a2rl_carver.overtake_ready:
+            ot_rdy = a2rl_carver.overtake_ready
+            # If locked in overtake, stay until gap < 0 (passed) or gap > 25 (gave up)
+            if _overtake_locked:
+                if nearest_gap > 25.0 or gap < -5.0:
+                    _overtake_locked = False
+                else:
                     current_mode = CarverMode.OVERTAKE
+            if not _overtake_locked:
+                if nearest_gap <= 15.0 and ot_rdy:
+                    current_mode = CarverMode.OVERTAKE
+                    _overtake_locked = True
+                elif nearest_gap > 30.0:
+                    current_mode = CarverMode.FOLLOW
+                elif nearest_gap > 15.0:
+                    current_mode = CarverMode.SHADOW
                 else:
                     current_mode = CarverMode.SHADOW
-            else:
-                if a2rl_carver.overtake_ready:
-                    current_mode = CarverMode.OVERTAKE
-                else:
-                    current_mode = CarverMode.FOLLOW
         else:
             current_mode = mode_map.get(carver_mode, CarverMode.OVERTAKE)
 
         mode_label = current_mode.name
 
-        # 4) Guidance
+        # 4) Guidance  (v4: let carver decide side in auto mode)
         horizon_m = cfg.optimization_horizon_m
         ds = horizon_m / cfg.N_steps_acados
+
+        _shadow_side = None if carver_mode == 'auto' else shadow_side
+        _overtake_side = None if carver_mode == 'auto' else overtake_side
 
         guidance = a2rl_carver.construct_guidance(
             ego_state, opp_states, cfg.N_steps_acados, ds,
             mode=current_mode,
-            shadow_side=shadow_side,
-            overtake_side=overtake_side,
+            shadow_side=_shadow_side,
+            overtake_side=_overtake_side,
             prev_trajectory=planner._prev_trajectory,
         )
 
@@ -186,11 +193,12 @@ def run_duel(
         # 6) Viz
         if visualize:
             rdy = "YES" if a2rl_carver.overtake_ready else "no"
+            sh_side = a2rl_carver.current_shadow_side
             tactical_info = (
                 f"Mode: {mode_label}\n"
                 f"Gap: {nearest_gap:.1f}m\n"
-                f"OT_Ready: {rdy}\n"
-                f"1v1 Duel"
+                f"OT_Ready: {rdy}  Side: {sh_side}\n"
+                f"Carver v4 PID"
             )
             viz.update(ego_state, trajectory,
                        opponents=[opp_pred],
@@ -204,12 +212,19 @@ def run_duel(
         ego_state = perfect_tracking_update(
             ego_state, trajectory, cfg.assumed_calc_time, track_handler)
 
-        # 9) Collision
-        dist = np.sqrt((ego_state['x'] - opponent.x)**2
-                       + (ego_state['y'] - opponent.y)**2)
-        collision = dist < cfg.vehicle_length * 0.5
+        # 9) Collision  (v4: s-gap based, box overlap check)
+        opp_s_now = opponent.s
+        delta_s = ego_state['s'] - opp_s_now
+        if delta_s > track_len / 2:
+            delta_s -= track_len
+        elif delta_s < -track_len / 2:
+            delta_s += track_len
+        delta_n = abs(ego_state['n'] - opponent.n)
+        # Collision if longitudinal overlap AND lateral overlap
+        collision = (abs(delta_s) < cfg.vehicle_length and
+                     delta_n < cfg.vehicle_width)
         if collision:
-            print(f"\n*** COLLISION at step {step}! ***")
+            print(f"\n*** COLLISION at step {step}! ds={delta_s:.2f} dn={delta_n:.2f} ***")
 
         # 10) Log
         log_rows.append({
@@ -225,6 +240,7 @@ def run_duel(
             'opp_V': opp_V,
             'opp_s': opp_state['s'],
             'opp_n': opp_state['n'],
+            'shadow_side': a2rl_carver.current_shadow_side,
             'speed_cap': guidance.speed_cap,
             'speed_scale': guidance.speed_scale,
             'planner_ok': planner.planner_healthy,
@@ -272,7 +288,7 @@ def run_duel(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='1v1 Duel Simulation')
-    parser.add_argument('--scenario', type=str, default='duel_a',
+    parser.add_argument('--scenario', type=str, default='duel_c',
                         help='duel_a, duel_b, duel_c')
     parser.add_argument('--mode', type=str, default='auto',
                         choices=['auto', 'follow', 'shadow', 'overtake', 'raceline'],

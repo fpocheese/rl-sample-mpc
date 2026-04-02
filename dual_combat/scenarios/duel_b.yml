@@ -1,14 +1,14 @@
-# Duel B: 1v1 medium gap — shadow & pressure
+# Duel B: 1v1 back-straight zone — shadow & pressure (s=1900~3000)
 scenario:
-  name: "1v1 Duel B - Medium Gap"
+  name: "1v1 Duel B - Back Straight"
   track_name: "yas_user_smoothed"
   vehicle_name: "eav25_car"
   raceline_name: "yasnorth_3d_rl_as_ref_eav25_car_gg_0.1"
-  s_start: 50.0
-  s_end: 1700.0
+  s_start: 1900.0
+  s_end: 3000.0
 
 ego:
-  start_s: 50.0
+  start_s: 1900.0
   start_n: 0.0
   start_V: 50.0
   start_chi: 0.0
@@ -17,7 +17,7 @@ ego:
 
 opponents:
   - id: 1
-    start_s: 120.0
+    start_s: 1940.0
     start_n: -0.5
     start_V: 44.0
     speed_scale: 0.90
