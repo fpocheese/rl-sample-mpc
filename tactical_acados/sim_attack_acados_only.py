@@ -1,16 +1,25 @@
 """
-Full tactical simulation entry point (Phase 3).
+Carver-only simulation (no decision layer).
 
-Runs a 3-car tactical racing simulation:
-  Scenario YAML → ego + opponents → tactical decision → safe wrapper →
-  planner guidance → ACADOS plan → perfect tracking
+Lock a single CarverMode and run complete scenario with CSV data export.
 
-Configure settings directly in the __main__ block below.
+Supported locked modes:
+  'follow'   : force FOLLOW (stable car-following funnel)
+  'shadow'   : force SHADOW (side-threatening funnel)
+  'overtake' : force OVERTAKE (v1 aggressive pass)
+  'raceline' : force RACELINE (converge to global raceline)
+  'auto'     : gap-based auto switching
+
+Usage:
+  python sim_attack_acados_only.py                    # default: auto
+  python sim_attack_acados_only.py --mode follow
+  python sim_attack_acados_only.py --mode raceline --no-viz
 """
 
 import os
 import sys
 import time
+import csv
 import numpy as np
 import yaml
 
@@ -20,46 +29,30 @@ project_root = os.path.join(dir_path, '..')
 sys.path.insert(0, os.path.join(project_root, 'src'))
 sys.path.insert(0, dir_path)
 
-from track3D import Track3D
-from ggManager import GGManager
-from local_racing_line_planner import LocalRacinglinePlanner
-from global_racing_line_planner import GlobalRacinglinePlanner
-from point_mass_model import export_point_mass_ode_model
-
 from config import TacticalConfig
 from acados_planner import AcadosTacticalPlanner
-from tactical_action import TacticalAction, PlannerGuidance, get_fallback_action
-from observation import TacticalObservation, build_observation
-from safe_wrapper import SafeTacticalWrapper
-from planner_guidance import TacticalToPlanner
+from tactical_action import PlannerGuidance, get_fallback_action
 from opponent import OpponentVehicle
-from p2p import PushToPass
-from follow_module import FollowModule
 from sim_acados_only import load_setup, create_initial_state, perfect_tracking_update
 
 
 def load_scenario(scenario_name: str) -> dict:
-    """Load scenario YAML file."""
     scenario_path = os.path.join(dir_path, 'scenarios', f'{scenario_name}.yml')
     with open(scenario_path, 'r') as f:
         return yaml.safe_load(f)
 
 
-def run_tactical_simulation(
-        scenario_name: str = 'scenario_a',
-        max_steps: int = 999999,
-        visualize: bool = True,
-        policy_type: str = 'heuristic',
-        carver_mode: str = 'auto',
-        shadow_side: str = 'left',
-        overtake_side: str = None,
+def run_carver_simulation(
+        scenario_name='scenario_a',
+        max_steps=999999,
+        visualize=True,
+        carver_mode='auto',
+        shadow_side='left',
+        overtake_side=None,
 ):
-    """Run full tactical 3-car simulation with multi-mode carver."""
+    """Run locked-mode carver simulation with full data recording."""
 
-    # Make mode config accessible in loop
-    CARVER_MODE = carver_mode
-    SHADOW_SIDE = shadow_side
-    OVERTAKE_SIDE = overtake_side
+    from a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
 
     # Load scenario
     scenario = load_scenario(scenario_name)
@@ -68,14 +61,12 @@ def run_tactical_simulation(
     opp_cfgs = scenario.get('opponents', [])
     planner_cfg = scenario.get('planner', {})
 
-    # Config
     cfg = TacticalConfig()
     cfg.optimization_horizon_m = planner_cfg.get('optimization_horizon_m', 500.0)
     cfg.gg_margin = planner_cfg.get('gg_margin', 0.1)
     cfg.safety_distance_default = planner_cfg.get('safety_distance', 0.5)
     cfg.assumed_calc_time = planner_cfg.get('assumed_calc_time', 0.125)
 
-    # Load track/vehicle setup
     params, track_handler, gg_handler, local_planner, global_planner = load_setup(
         cfg,
         track_name=sc.get('track_name', 'yas_user_smoothed'),
@@ -83,7 +74,6 @@ def run_tactical_simulation(
         raceline_name=sc.get('raceline_name', 'yasnorth_3d_rl_as_ref_eav25_car_gg_0.1'),
     )
 
-    # Create ACADOS planner wrapper
     planner = AcadosTacticalPlanner(
         local_planner=local_planner,
         global_planner=global_planner,
@@ -92,11 +82,9 @@ def run_tactical_simulation(
         cfg=cfg,
     )
 
-    # Replace all tactical components with raw A2RL carver (v2 multi-mode)
-    from a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
-    a2rl_carver = A2RLObstacleCarver(track_handler, cfg)
+    # Carver with global_planner (needed for RACELINE mode)
+    a2rl_carver = A2RLObstacleCarver(track_handler, cfg, global_planner=global_planner)
 
-    # Initial ego state
     ego_state = create_initial_state(
         track_handler,
         start_s=ego_cfg['start_s'],
@@ -107,7 +95,6 @@ def run_tactical_simulation(
         start_ay=ego_cfg.get('start_ay', 0.0),
     )
 
-    # Create opponents
     opponents = []
     for opp_cfg in opp_cfgs:
         opp = OpponentVehicle(
@@ -122,138 +109,136 @@ def run_tactical_simulation(
         )
         opponents.append(opp)
 
-    # Create follow module (for FOLLOW mode and fallback)
-    follow_mod = FollowModule(track_handler, cfg)
-
-    # Visualization
     if visualize:
         from visualizer_tactical import TacticalVisualizer
         viz = TacticalVisualizer(track_handler, gg_handler, params,
-                                  n_opponents=len(opponents))
+                                 n_opponents=len(opponents))
 
-    # Previous action for smoothness
-    prev_action = get_fallback_action()
-
-    # Logging
-    log = {
-        'step': [], 's': [], 'n': [], 'V': [],
-        'tactic': [], 'alpha': [], 'planner_ok': [],
-        'reward_prog': [], 'reward_safe': [],
+    # Mode string -> CarverMode mapping
+    mode_map = {
+        'follow': CarverMode.FOLLOW,
+        'shadow': CarverMode.SHADOW,
+        'overtake': CarverMode.OVERTAKE,
+        'raceline': CarverMode.RACELINE,
     }
 
+    # Logging
+    log_rows = []
+    track_len = track_handler.s[-1]
+
     print("=" * 70)
-    print(f"Tactical Simulation: {sc['name']}")
-    print(f"  Ego starts at s={ego_cfg['start_s']}, Opponents: {len(opponents)}")
-    print(f"  Policy: {policy_type}, Max steps: {max_steps}")
+    print(f"Carver Simulation: {sc['name']}")
+    print(f"  Mode: {carver_mode.upper()}, Opponents: {len(opponents)}")
+    print(f"  Ego s={ego_cfg['start_s']}, Max steps: {max_steps}")
     print("=" * 70)
 
     for step in range(max_steps):
         t_start = time.time()
 
-        # Step 1: Extract opponent states and predictions natively
+        # 1) Opponent states
         opp_predictions = [opp.predict() for opp in opponents]
         opp_states = [opp.get_state() for opp in opponents]
         for os_dict, pred in zip(opp_states, opp_predictions):
             os_dict['pred_s'] = pred['pred_s']
             os_dict['pred_n'] = pred['pred_n']
 
-        # Step 2: Determine carver mode based on gap
-        horizon_m = cfg.optimization_horizon_m
-        ds = horizon_m / cfg.N_steps_acados
-
-        # Compute gap to nearest opponent ahead
+        # 2) Compute gap
         nearest_gap = 999.0
+        nearest_opp_V = 0.0
         for os_dict in opp_states:
             g = os_dict['s'] - ego_state['s']
-            tl = track_handler.s[-1]
-            if g > tl / 2: g -= tl
-            elif g < -tl / 2: g += tl
+            if g > track_len / 2: g -= track_len
+            elif g < -track_len / 2: g += track_len
             if 0 < g < nearest_gap:
                 nearest_gap = g
+                nearest_opp_V = os_dict.get('V', 0.0)
 
-        # Mode selection logic: FOLLOW -> SHADOW -> OVERTAKE
-        if CARVER_MODE == 'auto':
+        # 3) Determine mode
+        if carver_mode == 'auto':
             if nearest_gap > 40.0:
                 current_mode = CarverMode.FOLLOW
-                mode_label = "FOLLOW"
             elif nearest_gap > 12.0:
                 current_mode = CarverMode.SHADOW
-                mode_label = "SHADOW"
             else:
                 if a2rl_carver.overtake_ready or nearest_gap < 8.0:
                     current_mode = CarverMode.OVERTAKE
-                    mode_label = "OVERTAKE"
                 else:
                     current_mode = CarverMode.SHADOW
-                    mode_label = "SHADOW"
         else:
-            current_mode = {
-                'follow': CarverMode.FOLLOW,
-                'shadow': CarverMode.SHADOW,
-                'overtake': CarverMode.OVERTAKE,
-            }.get(CARVER_MODE, CarverMode.OVERTAKE)
-            mode_label = current_mode.name
+            current_mode = mode_map.get(carver_mode, CarverMode.OVERTAKE)
+
+        mode_label = current_mode.name
+
+        # 4) Build guidance
+        horizon_m = cfg.optimization_horizon_m
+        ds = horizon_m / cfg.N_steps_acados
 
         guidance = a2rl_carver.construct_guidance(
-            ego_state,
-            opp_states,
-            cfg.N_steps_acados,
-            ds,
+            ego_state, opp_states, cfg.N_steps_acados, ds,
             mode=current_mode,
-            shadow_side=SHADOW_SIDE,
-            overtake_side=OVERTAKE_SIDE,
+            shadow_side=shadow_side,
+            overtake_side=overtake_side,
             prev_trajectory=planner._prev_trajectory,
         )
 
-        # Step 5: Plan with ACADOS
+        # 5) Plan
         trajectory = planner.plan(ego_state, guidance)
-
-
-
         t_plan = time.time() - t_start
 
+        # 6) Visualize
         if visualize:
             rdy = "YES" if a2rl_carver.overtake_ready else "no"
             tactical_info = (
                 f"Mode: {mode_label}\n"
                 f"Gap: {nearest_gap:.1f}m\n"
                 f"OT_Ready: {rdy}\n"
-                f"Carver v2"
+                f"Carver v3"
             )
             viz.update(ego_state, trajectory,
                        opponents=opp_predictions,
                        tactical_info=tactical_info,
                        guidance=guidance)
 
-        # Step 7: Move opponents
+        # 7) Move opponents
         for opp in opponents:
             opp.step(cfg.assumed_calc_time, ego_state)
 
-        # Step 9: Perfect tracking update for ego
+        # 8) Perfect tracking
         ego_state = perfect_tracking_update(
-            ego_state, trajectory, cfg.assumed_calc_time, track_handler
-        )
+            ego_state, trajectory, cfg.assumed_calc_time, track_handler)
 
-        # Step 10: Log
-        log['step'].append(step)
-        log['s'].append(ego_state['s'])
-        log['n'].append(ego_state['n'])
-        log['V'].append(ego_state['V'])
-        log['tactic'].append(mode_label)
-        log['alpha'].append(1.0)
-        log['planner_ok'].append(planner.planner_healthy)
+        # 9) Collision check
+        collision = False
+        for opp in opponents:
+            dist = np.sqrt((ego_state['x'] - opp.x)**2 + (ego_state['y'] - opp.y)**2)
+            if dist < cfg.vehicle_length * 0.5:
+                collision = True
+                print(f"\n*** COLLISION at step {step}! ***")
 
-        # Check scenario boundary
+        # 10) Log row
+        log_rows.append({
+            'step': step,
+            's': ego_state['s'],
+            'n': ego_state['n'],
+            'V': ego_state['V'],
+            'chi': ego_state['chi'],
+            'ax': ego_state['ax'],
+            'ay': ego_state['ay'],
+            'mode': mode_label,
+            'gap': nearest_gap,
+            'opp_V': nearest_opp_V,
+            'speed_cap': guidance.speed_cap,
+            'speed_scale': guidance.speed_scale,
+            'planner_ok': planner.planner_healthy,
+            'collision': collision,
+            'ot_ready': a2rl_carver.overtake_ready,
+            't_plan_ms': t_plan * 1000,
+        })
+
+        # Boundary
         if ego_state['s'] > sc.get('s_end', 1e6):
             print(f"\n*** Scenario boundary reached at step {step} ***")
             break
-
-        # Collision check (simplified)
-        for opp in opponents:
-            dist = np.sqrt((ego_state['x'] - opp.x)**2 +
-                           (ego_state['y'] - opp.y)**2)
-            if dist < cfg.vehicle_length * 0.5:
-                print(f"\n*** COLLISION at step {step}! ***")
 
         if step % 20 == 0:
             opp_info = " | ".join([f"Opp{o.vehicle_id}: s={o.s:.0f}" for o in opponents])
@@ -263,38 +248,53 @@ def run_tactical_simulation(
                   f"{rdy_str} | {opp_info} | "
                   f"{t_plan*1000:.0f}ms")
 
-    planner_success_rate = sum(log['planner_ok']) / max(len(log['planner_ok']), 1) * 100
-    print(f"\nDone: {len(log['step'])} steps, "
-          f"planner OK {planner_success_rate:.1f}%")
+    # Summary
+    n_ok = sum(1 for r in log_rows if r['planner_ok'])
+    n_col = sum(1 for r in log_rows if r['collision'])
+    n_total = len(log_rows)
+    rate = n_ok / max(n_total, 1) * 100
 
-    return log
+    print(f"\n{'='*70}")
+    print(f"Done: {n_total} steps, planner OK {rate:.1f}%, collisions {n_col}")
+    print(f"{'='*70}")
+
+    # Export CSV
+    csv_name = f"log_{carver_mode}_{scenario_name}.csv"
+    csv_path = os.path.join(dir_path, csv_name)
+    if log_rows:
+        keys = log_rows[0].keys()
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(log_rows)
+        print(f"Log saved: {csv_path}")
+
+    return log_rows
 
 
 if __name__ == '__main__':
-    # ============================================================
-    # Configure simulation settings here (no CLI args needed)
-    # ============================================================
-    SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
-    VISUALIZE = True            # Set to False for headless mode
-    MAX_STEPS = 999999          # Set very large for unlimited
-    POLICY = 'reactive'         # unused but kept for API compat
+    import argparse
+    parser = argparse.ArgumentParser(description='Carver-Only Simulation')
+    parser.add_argument('--scenario', type=str, default='scenario_a',
+                        help='scenario_a, scenario_b, scenario_c')
+    parser.add_argument('--mode', type=str, default='auto',
+                        choices=['auto', 'follow', 'shadow', 'overtake', 'raceline'],
+                        help='Locked carver mode')
+    parser.add_argument('--shadow-side', type=str, default='left',
+                        choices=['left', 'right'], help='Shadow side')
+    parser.add_argument('--overtake-side', type=str, default=None,
+                        choices=['left', 'right', None], help='Overtake side')
+    parser.add_argument('--max-steps', type=int, default=99999,
+                        help='Maximum simulation steps')
+    parser.add_argument('--no-viz', action='store_true',
+                        help='Disable visualization')
+    args = parser.parse_args()
 
-    # ---- Carver Mode Config ----
-    # 'auto'     : auto-switch FOLLOW->SHADOW->OVERTAKE based on gap
-    # 'follow'   : force FOLLOW mode (test stable following)
-    # 'shadow'   : force SHADOW mode (test side-threatening)
-    # 'overtake' : force OVERTAKE mode (original v1 behavior)
-    CARVER_MODE = 'auto'
-    SHADOW_SIDE = 'left'        # 'left' or 'right' for SHADOW mode
-    OVERTAKE_SIDE = None        # None=auto, 'left', 'right' for OVERTAKE
-    # ============================================================
-
-    run_tactical_simulation(
-        scenario_name=SCENARIO,
-        max_steps=MAX_STEPS,
-        visualize=VISUALIZE,
-        policy_type=POLICY,
-        carver_mode=CARVER_MODE,
-        shadow_side=SHADOW_SIDE,
-        overtake_side=OVERTAKE_SIDE,
+    run_carver_simulation(
+        scenario_name=args.scenario,
+        max_steps=args.max_steps,
+        visualize=not args.no_viz,
+        carver_mode=args.mode,
+        shadow_side=args.shadow_side,
+        overtake_side=args.overtake_side,
     )

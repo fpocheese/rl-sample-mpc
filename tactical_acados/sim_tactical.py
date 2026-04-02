@@ -92,13 +92,17 @@ def run_tactical_simulation(
     tactical_mapper = TacticalToPlanner(track_handler, cfg)
     p2p = PushToPass(cfg)
 
-    # A2RL obstacle carver (v2: multi-mode)
-    a2rl_carver = A2RLObstacleCarver(track_handler, cfg)
+    # A2RL obstacle carver (v3: cosine funnel multi-mode)
+    a2rl_carver = A2RLObstacleCarver(track_handler, cfg, global_planner=global_planner)
 
     # Policy
     if policy_type == 'heuristic':
         from policies.heuristic_policy import HeuristicTacticalPolicy
         policy = HeuristicTacticalPolicy(cfg)
+    elif policy_type == 'rl':
+        from policies.rl_policy import RLTacticalPolicy
+        model_path = os.path.join(dir_path, 'checkpoints', 'best_policy.pt')
+        policy = RLTacticalPolicy(model_path, cfg)
     elif policy_type == 'random':
         from policies.random_policy import RandomTacticalPolicy
         policy = RandomTacticalPolicy(cfg)
@@ -205,6 +209,7 @@ def run_tactical_simulation(
             'follow': CarverMode.FOLLOW,
             'shadow': CarverMode.SHADOW,
             'overtake': CarverMode.OVERTAKE,
+            'raceline': CarverMode.RACELINE,
         }
         c_mode = carver_mode_map.get(
             getattr(policy, 'carver_mode_str', 'follow'),
@@ -346,18 +351,17 @@ def run_tactical_simulation(
 
 
 if __name__ == '__main__':
-    # ============================================================
-    # Configure simulation settings here
-    # ============================================================
-    SCENARIO = 'scenario_a'     # 'scenario_a', 'scenario_b', 'scenario_c'
-    VISUALIZE = True
-    MAX_STEPS = 999999
-    POLICY = 'heuristic'        # 'heuristic' or 'random'
-    # ============================================================
+    import argparse
+    parser = argparse.ArgumentParser(description='Tactical Simulation')
+    parser.add_argument('--scenario', type=str, default='scenario_a', help='scenario_a, scenario_b, scenario_c')
+    parser.add_argument('--policy', type=str, default='heuristic', choices=['heuristic', 'random', 'rl'], help='Tactical policy type')
+    parser.add_argument('--max-steps', type=int, default=99999, help='Maximum simulation steps')
+    parser.add_argument('--no-viz', action='store_true', help='Disable visualization')
+    args = parser.parse_args()
 
     run_tactical_simulation(
-        scenario_name=SCENARIO,
-        max_steps=MAX_STEPS,
-        visualize=VISUALIZE,
-        policy_type=POLICY,
+        scenario_name=args.scenario,
+        max_steps=args.max_steps,
+        visualize=not args.no_viz,
+        policy_type=args.policy,
     )
