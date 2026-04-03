@@ -1,0 +1,3650 @@
+#include "traj_planner.hpp"
+#include "ecos.h"
+#include "version.hpp"
+
+OptPlanner::OptPlanner(int input_point_num, double input_point_dt) : out_point_num(input_point_num), out_point_dt(input_point_dt) {
+
+    printf("OptPlanner Library Version: %s\n", BUILD_VERSION);
+
+    is_init = false;
+    _v_max = 75.0;
+    previous_target_velocity_hpp = 0.0f;
+    overtake_coeff_cw = 0.4;
+    overtake_coeff_cn = 0.4;
+    max_iter_path_local = 5;
+
+    foresee_coeff = 0.1;
+
+    local_optimizer_result = 0;
+    vel_planner_method = 1;  // 默认使用 ECOS，外部显式设置 1 才走 ForwardBackward
+    ggv_exp = 1.1;           // GGV 超椭圆形状指数，默认 2.0 (完美椭圆)
+
+    BaseLine = std::make_shared<TRACKdata>();
+    SouthBaseLine = std::make_shared<TRACKdata>();
+    PitBaseLine = std::make_shared<TRACKdata>();
+    Vehicle = std::make_shared<CARdata>();
+    RaceLine = std::make_shared<TRAJdata>();
+    RaceLineLeft = std::make_shared<TRAJdata>();
+    RaceLineRight = std::make_shared<TRAJdata>();
+    PitLine1 = std::make_shared<TRAJdata>();
+    PitLine2 = std::make_shared<TRAJdata>();
+    SouthRaceLine = std::make_shared<TRAJdata>();
+    SouthRaceLineLeft = std::make_shared<TRAJdata>();
+    SouthRaceLineRight = std::make_shared<TRAJdata>();
+    StateI = std::make_shared<STATE>();
+    StateSouthI = std::make_shared<STATE>();
+    StateIPit1 = std::make_shared<STATE>();
+    StateIPit2 = std::make_shared<STATE>();
+    StateE = std::make_shared<STATE>();
+    PassLine = std::make_shared<TRAJdata>();
+}
+
+OptPlanner::~OptPlanner() {
+
+}
+
+void OptPlanner::set_forsee_coeff(double coeff) {
+    foresee_coeff = coeff;
+}
+
+void OptPlanner::set_overtake_coeff_cw(double coeff) {
+    overtake_coeff_cw = coeff;
+}
+
+void OptPlanner::set_overtake_coeff_cn(double coeff) {
+    overtake_coeff_cn = coeff;
+}
+
+void OptPlanner::setTerminalOverride(bool enable, double s, double l, double A, double v) {
+    terminal_enable = enable;
+    terminal_s = s;
+    terminal_l = l;
+    terminal_A = A;
+    terminal_v = v;
+}
+
+int OptPlanner::WhereAmI(double xpos, double ypos, double angle) {
+    const double Rdec = 4.0;
+    const double Adec = 15 * M_PI / 180;
+
+    int i, p1, p2;
+    int flag = 0;
+
+    /* Whether in PitLine 1 */
+    p1 = 1385 - 1;   // 2505 - 1   suzuka:2852 - 1   northold 1377
+    p2 = PitLine1->N;
+    for (i = p1; i < p2; i++) {
+        if (sqrt(pow(xpos - PitLine1->Xref[i], 2) + pow(ypos - PitLine1->Yref[i], 2)) <= Rdec) {
+            if (fabs(wrapToPi(angle - wrapToPi(PitLine1->Aref[i]))) < Adec) {
+                flag = 1;
+                break;
+            }
+        }
+    }
+
+    if (flag == 0) {
+        p1 = 1 - 1;
+        p2 = 302;  // 325    suzuka:182   northold 337  380会误检测
+        for (i = p1; i < p2; i++) {
+            if (sqrt(pow(xpos - PitLine1->Xref[i], 2) + pow(ypos - PitLine1->Yref[i], 2)) <= Rdec) {
+                if (fabs(wrapToPi(angle - wrapToPi(PitLine1->Aref[i]))) < Adec) {
+                    flag = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Whether in PitLine 2 */
+    if (flag == 0) {
+        p1 = 1052 - 1;
+        p2 = 1350;
+        for (i = p1; i < p2; i++) {
+            if (sqrt(pow(xpos - PitLine2->Xref[i], 2) + pow(ypos - PitLine2->Yref[i], 2)) <= Rdec) {
+                if (fabs(wrapToPi(angle - wrapToPi(PitLine2->Aref[i]))) < Adec) {
+                    flag = 2;
+                    break;
+                }
+            }
+        }
+    }
+
+    return flag;
+}
+
+int OptPlanner::WhereAmI_South(double xpos, double ypos, double angle) {
+    const double Rdec = 4.0;
+    const double Adec = 15 * M_PI / 180;
+
+    int i, p1, p2;
+    int flag = 0;
+
+    /* Whether in PitLine 1 */
+    p1 = 996 - 1;
+    p2 = PitLine2->N;
+    for (i = p1; i < p2; i++) {
+        if (sqrt(pow(xpos - PitLine2->Xref[i], 2) + pow(ypos - PitLine2->Yref[i], 2)) <= Rdec) {
+            if (fabs(wrapToPi(angle - wrapToPi(PitLine2->Aref[i]))) < Adec) {
+                flag = 2;
+                break;
+            }
+        }
+    }
+
+    if (flag == 0) {
+        p1 = 1 - 1;
+        p2 = 290;
+        for (i = p1; i < p2; i++) {
+            if (sqrt(pow(xpos - PitLine2->Xref[i], 2) + pow(ypos - PitLine2->Yref[i], 2)) <= Rdec) {
+                if (fabs(wrapToPi(angle - wrapToPi(PitLine2->Aref[i]))) < Adec) {
+                    flag = 2;
+                    break;
+                }
+            }
+        }
+    }
+
+    return flag;
+}
+
+std::tuple<double, double, double, double, double, double> OptPlanner::GetState(double meX, double meY, double meAngleOffset, double meSpeed) {
+    StateI->N = 1;
+    StateI->s = std::vector<double>(StateI->N);
+    StateI->l = std::vector<double>(StateI->N);
+    StateI->x = std::vector<double>(StateI->N);
+    StateI->y = std::vector<double>(StateI->N);
+    StateI->a = std::vector<double>(StateI->N);
+    StateI->da = std::vector<double>(StateI->N);
+    StateI->v = std::vector<double>(StateI->N);
+    StateI->x[0] = meX;
+    StateI->y[0] = meY;
+    StateI->a[0] = meAngleOffset;
+    StateI->v[0] = meSpeed;
+
+    StateIPit1->N = 1;
+    StateIPit1->s = std::vector<double>(StateIPit1->N);
+    StateIPit1->l = std::vector<double>(StateIPit1->N);
+    StateIPit1->x = std::vector<double>(StateIPit1->N);
+    StateIPit1->y = std::vector<double>(StateIPit1->N);
+    StateIPit1->a = std::vector<double>(StateIPit1->N);
+    StateIPit1->da = std::vector<double>(StateIPit1->N);
+    StateIPit1->v = std::vector<double>(StateIPit1->N);
+    StateIPit1->x[0] = meX;
+    StateIPit1->y[0] = meY;
+    StateIPit1->a[0] = meAngleOffset;
+    StateIPit1->v[0] = meSpeed;
+
+    StateIPit2->N = 1;
+    StateIPit2->s = std::vector<double>(StateIPit2->N);
+    StateIPit2->l = std::vector<double>(StateIPit2->N);
+    StateIPit2->x = std::vector<double>(StateIPit2->N);
+    StateIPit2->y = std::vector<double>(StateIPit2->N);
+    StateIPit2->a = std::vector<double>(StateIPit2->N);
+    StateIPit2->da = std::vector<double>(StateIPit2->N);
+    StateIPit2->v = std::vector<double>(StateIPit2->N);
+    StateIPit2->x[0] = meX;
+    StateIPit2->y[0] = meY;
+    StateIPit2->a[0] = meAngleOffset;
+    StateIPit2->v[0] = meSpeed;
+
+    StateSouthI->N = 1;
+    StateSouthI->s = std::vector<double>(StateSouthI->N);
+    StateSouthI->l = std::vector<double>(StateSouthI->N);
+    StateSouthI->x = std::vector<double>(StateSouthI->N);
+    StateSouthI->y = std::vector<double>(StateSouthI->N);
+    StateSouthI->a = std::vector<double>(StateSouthI->N);
+    StateSouthI->da = std::vector<double>(StateSouthI->N);
+    StateSouthI->v = std::vector<double>(StateSouthI->N);
+    StateSouthI->x[0] = meX;
+    StateSouthI->y[0] = meY;
+    StateSouthI->a[0] = meAngleOffset;
+    StateSouthI->v[0] = meSpeed;
+
+    StateTrans(StateI, RaceLine);
+    StateTrans(StateIPit1, PitLine1);
+    StateTrans(StateIPit2, PitLine2);
+    StateTrans(StateSouthI, SouthRaceLine);
+
+    double Ldes, dl, K_ref_getstate, L_to_left_bound, L_to_right_bound;
+    Ldes = Interp1(RaceLineLeft->Sref, RaceLineLeft->L, RaceLineLeft->N, StateI->s[0]);
+    dl = fabs(StateI->l[0] - Ldes);
+    K_ref_getstate = Interp1(RaceLine->Sref, RaceLine->Kref, RaceLine->N, StateI->s[0]);
+
+    L_to_right_bound = StateI->l[0] - Interp1(RaceLine->Sref, RaceLine->Lmin, RaceLine->N, StateI->s[0]); 
+    L_to_left_bound = Interp1(RaceLine->Sref, RaceLine->Lmax, RaceLine->N, StateI->s[0]) - StateI->l[0];
+
+    double A_ref;
+    A_ref = Interp1(RaceLine->Sref, RaceLine->Aref, RaceLine->N, StateI->s[0]);
+
+    return std::make_tuple(StateI->s[0], StateI->l[0], A_ref, K_ref_getstate, L_to_left_bound, L_to_right_bound);
+}
+
+void OptPlanner::checkRampVelocityDecrease(float ref_speed, float rc_speed, float &previous_speed, float &target_speed, float &previous_target_velocity, int iter, float step_period_, double acceleration_ramp_g ) {
+    //------------- 新添加的根据ggv减速----------------------------
+    double acceleration_ramp_ms2 = 0.0 ;
+    double K_ref_acc = 0.0 ;
+    double An_ref = 0.0 ;
+    double Aw_ref = 0.0 ;
+    K_ref_acc = Interp1(RaceLine->Sref, RaceLine->Kref, RaceLine->N, StateI->s[0]);
+    An_ref = 1.8 * Interp1(Vehicle->V, Vehicle->An, Vehicle->N, previous_speed);
+	Aw_ref = 1.8 * Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, previous_speed);
+    // 1. 计算当前侧向加速度 (an_current)
+    double an_current = previous_speed * previous_speed * K_ref_acc;
+    // 2. 计算最大纵向加速度 (aw_max)，基于 GGV 椭圆约束
+    double aw_max = 0.0; // 默认 0
+    if (An_ref > 0.0)
+    { // 避免除零
+        double ratio = an_current / An_ref;
+        if (ratio <= 1.0)
+        {
+            aw_max = Aw_ref * std::pow(std::max(0.0, 1.0 - std::pow(ratio, ggv_exp)), 1.0 / ggv_exp);
+        }
+        // 如果 ratio > 1，aw_max 保持 0（侧向已超限）
+    }
+    else
+    {
+        aw_max = Aw_ref; // 如果 An_ref 为 0（低速），直接用 Aw_ref
+    }
+    // ---------------------------------------------------------------
+
+    // acceleration_ramp_ms2 = acceleration_ramp_g * 9.8;  // 恒定两个g减速
+    acceleration_ramp_ms2 = -aw_max ;     // 根据ggv减速
+    if (rc_speed < ref_speed) {
+        const float ramp_velocity =
+            std::max(static_cast<float>(0.0),
+                     static_cast<float>(previous_speed + acceleration_ramp_ms2 * out_point_dt));
+
+        target_speed = std::clamp(ramp_velocity, rc_speed, ref_speed);
+
+        if (iter == 0)
+            previous_target_velocity =
+                std::max(target_speed,
+                         static_cast<float>(
+                             previous_target_velocity +
+                             acceleration_ramp_ms2 * step_period_));
+
+        previous_speed = target_speed;
+    } else {
+        target_speed = rc_speed;  // 以前是 target_speed = ref_speed
+
+        if (iter == 0)
+            previous_target_velocity = rc_speed;  // 以前是 previous_target_velocity = ref_speed
+    }
+
+    float min_speed = 0.01;  // 0.001 meters per second
+    target_speed = std::max(min_speed, target_speed);
+}
+
+void OptPlanner::GetGlobalResult(int flag_tacknumber, int flag_state, std::vector<double> &x, std::vector<double> &y, std::vector<double> &angleRad, std::vector<double> &curvature, std::vector<double> &speed, std::vector<double> &time, double &Race_s, double perc, double rc_vel, double vel_now, float step_period_, double acceleration_ramp_g) {
+    // 根据 flag_tacknumber 选择不同的 RaceLine
+    std::shared_ptr<TRAJdata> selectedRaceLine;
+    switch (flag_tacknumber) {
+        case 0:
+            selectedRaceLine = RaceLine;
+            break;
+        case 1:
+            selectedRaceLine = RaceLineLeft;
+            break;
+        case 2:
+            selectedRaceLine = RaceLineRight;
+            break;
+        case 3:
+            selectedRaceLine = PitLine1;
+            break;
+        case 4:
+            selectedRaceLine = PitLine2;
+            break;
+        case 5:
+            selectedRaceLine = SouthRaceLine;
+            break;
+        case 6:
+            selectedRaceLine = SouthRaceLineLeft;
+            break;
+        case 7:
+            selectedRaceLine = SouthRaceLineRight;
+            break;
+        default:
+            // 如果 flag_tacknumber 不在有效范围内，可以选择默认值或抛出错误
+            selectedRaceLine = RaceLine;  // 默认选择 RaceLine
+            std::cerr << "Invalid flag_tacknumber, defaulting to RaceLine" << std::endl;
+            break;
+    }
+
+    // 根据 flag_state 选择不同的 StateI
+    std::shared_ptr<STATE> selectedState;
+    switch (flag_state) {
+        case 0:
+            selectedState = StateI;
+            break;
+        case 1:
+            selectedState = StateIPit1;
+            break;
+        case 2:
+            selectedState = StateIPit2;
+            break;
+        case 3:
+            selectedState = StateSouthI;
+            break;
+        default:
+            // 如果 flag_state 不在有效范围内，可以选择默认值或抛出错误
+            selectedState = StateI;  // 默认选择 StateI
+            std::cerr << "Invalid flag_state, defaulting to StateI" << std::endl;
+            break;
+    }
+
+    int i, idx;
+    double Vt;
+    double Vt_rc, Vdes, Vt_origin, DV, AT, ref_speed;
+    float target_speed, rc_vel_middle;
+    std::vector<double> S(out_point_num), St(out_point_num), Acopy(selectedRaceLine->N), V(out_point_num);
+    float previous_speed = vel_now;
+
+    x.resize(out_point_num);
+    y.resize(out_point_num);
+    angleRad.resize(out_point_num);
+    curvature.resize(out_point_num);
+    speed.resize(out_point_num);
+    time.resize(out_point_num);  // time 暂时修改为存储期望纵向加速度
+
+    Race_s = selectedState->s[0];  // 使用 selectedState 而不是 StateI
+    S[0] = selectedState->s[0];    // 使用 selectedState 而不是 StateI
+    St[0] = 0.0;
+    ref_speed = Interp1(selectedRaceLine->Sref, selectedRaceLine->Vs, selectedRaceLine->N, S[0]);
+
+    float speed_now_for_v0 = vel_now ;
+    float v0_start_rc = std::min(ref_speed * perc * 0.01, rc_vel) ;
+    if (ref_speed < rc_vel && perc >= 100){
+        V[0] = ref_speed;
+    }
+    else{
+        // // -------------------------- old --------------------------
+        // // V[0] = vel_now;   //第一个点是否是当前速度是个问题
+        // V[0] = std::min(ref_speed * perc * 0.01, rc_vel);
+        // // ---------------------------------------------------------
+
+        // -------------------- new --------------------------------
+        if (vel_now <= v0_start_rc)
+        {
+            V[0] = v0_start_rc;
+        }
+        else
+        {
+            checkRampVelocityDecrease(ref_speed, v0_start_rc, speed_now_for_v0, target_speed,
+                                      previous_target_velocity_hpp, 0, step_period_, acceleration_ramp_g);
+            V[0] = target_speed;
+        }
+        // ---------------------------------------------------------
+    }
+    previous_speed = V[0];
+    for (i = 1; i < out_point_num; i++) {
+        St[i] = St[i - 1] + out_point_dt * V[i - 1];
+        S[i] = fmod(St[i] + S[0], selectedRaceLine->Sref[selectedRaceLine->N - 1]);
+        ref_speed = Interp1(selectedRaceLine->Sref, selectedRaceLine->Vs, selectedRaceLine->N, S[i]);
+
+        rc_vel_middle = std::min(ref_speed * perc * 0.01, rc_vel);
+
+        checkRampVelocityDecrease(ref_speed, rc_vel_middle, previous_speed, target_speed,
+                                  previous_target_velocity_hpp, i, step_period_, acceleration_ramp_g);
+
+        V[i] = target_speed;
+    }
+
+    for (i = 0; i < out_point_num; i++) {
+        x[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->X, selectedRaceLine->N, S[i]);
+        y[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->Y, selectedRaceLine->N, S[i]);
+        curvature[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->K, selectedRaceLine->N, S[i]);
+        speed[i] = V[i];
+        // time[i] = out_point_dt * i;
+        time[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->ATs, selectedRaceLine->N, S[i]);
+    }
+
+    if (S[0] > S[out_point_num - 1]) {
+        for (idx = selectedRaceLine->N - 1; idx >= 0; idx--) {
+            if (selectedRaceLine->Sref[idx] < S[0] - 100.0)
+                break;
+        }
+
+        for (i = 0; i < selectedRaceLine->N; i++) {
+            if (i > idx)
+                Acopy[i] = selectedRaceLine->A[i] - 2 * M_PI;
+            else
+                Acopy[i] = selectedRaceLine->A[i];
+        }
+
+        for (i = 0; i < out_point_num; i++) {
+            angleRad[i] = Interp1(selectedRaceLine->Sref, Acopy, selectedRaceLine->N, S[i]);
+        }
+    } else {
+        for (i = 0; i < out_point_num; i++) {
+            angleRad[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->A, selectedRaceLine->N, S[i]);
+        }
+    }
+
+    for (i = 0; i < out_point_num; i++) {
+        angleRad[i] = wrapToPi(angleRad[i]);
+    }
+}
+
+void OptPlanner::GetGlobalResultFB(int flag_tacknumber,
+                                   int flag_state,
+                                   std::vector<double> &x,
+                                   std::vector<double> &y,
+                                   std::vector<double> &angleRad,
+                                   std::vector<double> &curvature,
+                                   std::vector<double> &speed,
+                                   std::vector<double> &time,
+                                   double &Race_s,
+                                   double perc,
+                                   double rc_vel,
+                                   double vel_now,
+                                   float step_period_,
+                                   double acceleration_ramp_g)
+{
+    // 1) 选择轨迹和状态
+    std::shared_ptr<TRAJdata> selectedRaceLine;
+    switch (flag_tacknumber)
+    {
+    case 0:
+        selectedRaceLine = RaceLine;
+        break;
+    case 1:
+        selectedRaceLine = RaceLineLeft;
+        break;
+    case 2:
+        selectedRaceLine = RaceLineRight;
+        break;
+    case 3:
+        selectedRaceLine = PitLine1;
+        break;
+    case 4:
+        selectedRaceLine = PitLine2;
+        break;
+    case 5:
+        selectedRaceLine = SouthRaceLine;
+        break;
+    case 6:
+        selectedRaceLine = SouthRaceLineLeft;
+        break;
+    case 7:
+        selectedRaceLine = SouthRaceLineRight;
+        break;
+    default:
+        selectedRaceLine = RaceLine;
+        std::cerr << "Invalid flag_tacknumber, defaulting to RaceLine" << std::endl;
+        break;
+    }
+
+    std::shared_ptr<STATE> selectedState;
+    switch (flag_state)
+    {
+    case 0:
+        selectedState = StateI;
+        break;
+    case 1:
+        selectedState = StateIPit1;
+        break;
+    case 2:
+        selectedState = StateIPit2;
+        break;
+    case 3:
+        selectedState = StateSouthI;
+        break;
+    default:
+        selectedState = StateI;
+        std::cerr << "Invalid flag_state, defaulting to StateI" << std::endl;
+        break;
+    }
+
+    const double lap_len = selectedRaceLine->Sref[selectedRaceLine->N - 1];
+
+    x.resize(out_point_num);
+    y.resize(out_point_num);
+    angleRad.resize(out_point_num);
+    curvature.resize(out_point_num);
+    speed.resize(out_point_num);
+    time.resize(out_point_num);
+
+    std::vector<double> S_init(out_point_num, 0.0);
+    std::vector<double> St_init(out_point_num, 0.0);
+    std::vector<double> V_seed(out_point_num, 0.0);
+    std::vector<double> S_final(out_point_num, 0.0);
+    std::vector<double> St_final(out_point_num, 0.0);
+    std::vector<double> Acopy(selectedRaceLine->N, 0.0);
+
+    Race_s = selectedState->s[0];
+    S_init[0] = selectedState->s[0];
+    S_final[0] = selectedState->s[0];
+    St_init[0] = 0.0;
+    St_final[0] = 0.0;
+
+    // 2) 用参考路径速度生成一份纯参考 seed 采样，仅用于构造 PassLine
+    double ref_speed = Interp1(selectedRaceLine->Sref,
+                               selectedRaceLine->Vs,
+                               selectedRaceLine->N,
+                               S_init[0]);
+
+    V_seed[0] = std::max(0.01, ref_speed);
+
+    for (int i = 1; i < out_point_num; i++)
+    {
+        St_init[i] = St_init[i - 1] + out_point_dt * V_seed[i - 1];
+        S_init[i] = std::fmod(S_init[0] + St_init[i], lap_len);
+
+        ref_speed = Interp1(selectedRaceLine->Sref,
+                            selectedRaceLine->Vs,
+                            selectedRaceLine->N,
+                            S_init[i]);
+
+        V_seed[i] = std::max(0.01, ref_speed);
+    }
+
+    // 3) 用 seed 的 S 采样，把 path 填到 PassLine，供 VelOptForwardBackward 使用
+    if (PassLine->N != out_point_num)
+    {
+        PassLine->N = out_point_num;
+    }
+
+    PassLine->Sref.resize(out_point_num);
+    PassLine->S.resize(out_point_num);
+    PassLine->X.resize(out_point_num);
+    PassLine->Y.resize(out_point_num);
+    PassLine->A.resize(out_point_num);
+    PassLine->K.resize(out_point_num);
+    PassLine->V.resize(out_point_num);
+    PassLine->AT.resize(out_point_num);
+    PassLine->AN.resize(out_point_num);
+    PassLine->Vs.resize(out_point_num);
+    PassLine->ATs.resize(out_point_num);
+    PassLine->ANs.resize(out_point_num);
+
+    for (int i = 0; i < out_point_num; i++)
+    {
+        // 局部 FB 内部使用单调的局部弧长坐标，避免跨圈后 Sref 回绕
+        PassLine->Sref[i] = St_init[i];
+        PassLine->S[i] = St_init[i]; // VelOptForwardBackward 用的是 PassLine->S 的相邻差分
+
+        // 查全局参考线时仍然使用取模后的全局弧长坐标
+        double s_mod = S_init[i];
+
+        PassLine->X[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->X, selectedRaceLine->N, s_mod);
+        PassLine->Y[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->Y, selectedRaceLine->N, s_mod);
+        PassLine->A[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->A, selectedRaceLine->N, s_mod);
+        PassLine->K[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->K, selectedRaceLine->N, s_mod);
+        PassLine->Vs[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->Vs, selectedRaceLine->N, s_mod);
+        PassLine->ATs[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->ATs, selectedRaceLine->N, s_mod);
+        PassLine->ANs[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->ANs, selectedRaceLine->N, s_mod);
+    }
+
+    // 4) VelOptForwardBackward 内部读取 StateI->v[0] 作为初始速度
+    //    若当前使用的不是 StateI，需要临时切换一下，避免 South/Pit 场景速度起点错用
+    std::shared_ptr<STATE> stateF = std::make_shared<STATE>();
+    stateF->N = 1;
+    stateF->v = std::vector<double>(1, PassLine->Vs.back());
+
+    int fb_flag = VelOptForwardBackward(stateF, 2);
+
+    // 5) 若 FB 失败，则退回 seed 速度；若成功，则使用 FB 结果并叠加 rc_vel/perc 约束
+    std::vector<double> V_plan(out_point_num, 0.0);
+    if (fb_flag == 0)
+    {
+        for (int i = 0; i < out_point_num; i++)
+        {
+            V_plan[i] = std::max(0.01, PassLine->V[i]);
+        }
+    }
+    else
+    {
+        V_plan = V_seed;
+    }
+
+    // 6) 用最终速度重新积分一次 S，得到真正按 dt 展开的输出
+    for (int i = 1; i < out_point_num; i++)
+    {
+        St_final[i] = St_final[i - 1] + out_point_dt * V_plan[i - 1];
+        S_final[i] = std::fmod(S_final[0] + St_final[i], lap_len);
+    }
+    // 6.1) 基于最终输出位置 S_final，再做一次 rc_vel / perc 后处理限速
+    if (fb_flag == 0)
+    {
+        for (int i = 0; i < out_point_num; i++)
+        {
+            double ref_v_i = Interp1(selectedRaceLine->Sref,
+                                     selectedRaceLine->Vs,
+                                     selectedRaceLine->N,
+                                     S_final[i]);
+
+            double v_cap = std::min(ref_v_i * perc * 0.01, rc_vel);
+            if (perc >= 100.0 && ref_v_i < rc_vel)
+            {
+                v_cap = ref_v_i;
+            }
+
+            // V_plan[i] = std::min(V_plan[i], v_cap);
+            V_plan[i] = std::max(0.01, V_plan[i]);
+        }
+
+        // 限速后再重新积分一次 S_final，保证路径/速度时序一致
+        St_final[0] = 0.0;
+        S_final[0] = selectedState->s[0];
+        for (int i = 1; i < out_point_num; i++)
+        {
+            St_final[i] = St_final[i - 1] + out_point_dt * V_plan[i - 1];
+            S_final[i] = std::fmod(S_final[0] + St_final[i], lap_len);
+        }
+    }
+
+    // 7) 输出 path / heading / curvature / speed / time
+    for (int i = 0; i < out_point_num; i++)
+    {
+        x[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->X, selectedRaceLine->N, S_final[i]);
+        y[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->Y, selectedRaceLine->N, S_final[i]);
+        curvature[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->K, selectedRaceLine->N, S_final[i]);
+        speed[i] = V_plan[i];
+
+        // time 你原函数现在拿来存储期望纵向加速度
+        if (fb_flag == 0)
+        {
+            time[i] = Interp1(PassLine->Sref, PassLine->AT, PassLine->N, St_final[i]);
+        }
+        else
+        {
+            time[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->ATs, selectedRaceLine->N, S_final[i]);
+        }
+    }
+
+    if (S_final[0] > S_final[out_point_num - 1])
+    {
+        int idx = 0;
+        for (idx = selectedRaceLine->N - 1; idx >= 0; idx--)
+        {
+            if (selectedRaceLine->Sref[idx] < S_final[0] - 100.0)
+            {
+                break;
+            }
+        }
+
+        for (int i = 0; i < selectedRaceLine->N; i++)
+        {
+            if (i > idx)
+                Acopy[i] = selectedRaceLine->A[i] - 2 * M_PI;
+            else
+                Acopy[i] = selectedRaceLine->A[i];
+        }
+
+        for (int i = 0; i < out_point_num; i++)
+        {
+            angleRad[i] = Interp1(selectedRaceLine->Sref, Acopy, selectedRaceLine->N, S_final[i]);
+            angleRad[i] = wrapToPi(angleRad[i]);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < out_point_num; i++)
+        {
+            angleRad[i] = Interp1(selectedRaceLine->Sref, selectedRaceLine->A, selectedRaceLine->N, S_final[i]);
+            angleRad[i] = wrapToPi(angleRad[i]);
+        }
+    }
+}
+
+int OptPlanner::StartLocalOptimize(int flag_race_left_right, double meX, double meY, double meAngleOffset, double meSpeed, std::vector<double> othersX, std::vector<double> othersY, std::vector<double> othersAngleOffset, std::vector<double> othersSpeed) {
+    if (!is_init) {
+        printf("OptPlanner is not initialized. Check whether *.csv is read.\n");
+        return -1;
+    }
+
+    if (meSpeed > _v_max) {
+        meSpeed = _v_max;
+    }
+
+    // Process inputs (self)
+    StateI->N = 1;
+    StateI->s = std::vector<double>(StateI->N);
+    StateI->l = std::vector<double>(StateI->N);
+    StateI->x = std::vector<double>(StateI->N);
+    StateI->y = std::vector<double>(StateI->N);
+    StateI->a = std::vector<double>(StateI->N);
+    StateI->da = std::vector<double>(StateI->N);
+    StateI->v = std::vector<double>(StateI->N);
+    StateI->x[0] = meX;
+    StateI->y[0] = meY;
+    StateI->a[0] = meAngleOffset;
+    StateI->v[0] = meSpeed;
+
+    // Process inputs (others)
+    StateE->N = othersX.size();
+    StateE->s = std::vector<double>(StateE->N);
+    StateE->l = std::vector<double>(StateE->N);
+    StateE->x = std::vector<double>(StateE->N);
+    StateE->y = std::vector<double>(StateE->N);
+    StateE->a = std::vector<double>(StateE->N);
+    StateE->da = std::vector<double>(StateE->N);
+    StateE->v = std::vector<double>(StateE->N);
+    for (int i = 0; i < othersX.size(); i++) {
+        StateE->x[i] = othersX[i];
+        StateE->y[i] = othersY[i];
+        StateE->a[i] = othersAngleOffset[i];
+        StateE->v[i] = othersSpeed[i];
+    }
+
+    // Set local optimizer state flag to running
+    local_optimizer_result = localOptimize(flag_race_left_right);
+
+    return 0;
+}
+
+int OptPlanner::GetLocalOptResult(std::vector<double> &x, std::vector<double> &y, std::vector<double> &angleRad, std::vector<double> &curvature, std::vector<double> &speed, std::vector<double> &time, std::vector<double> &sref, double &Race_s, double perc, double rc_vel, double vel_now, float step_period_, double acceleration_ramp_g) {
+
+    if (!is_init) {
+        printf("OptPlanner is not initialized. Check whether *.csv is read.\n");
+        return -1;
+    }
+
+    sref.resize(out_point_num);
+    x.resize(out_point_num);
+    y.resize(out_point_num);
+    angleRad.resize(out_point_num);
+    curvature.resize(out_point_num);
+    speed.resize(out_point_num);
+    time.resize(out_point_num);
+
+    std::vector<double> St(out_point_num), S(out_point_num), V(out_point_num);
+    double v_ref, at_ref, v_des;
+
+    // ------------------------new-----------------------------
+
+    if (perc == 100)
+    {
+        St[0] = foresee_coeff * StateI->v[0];
+        S[0] = StateI->s[0] + St[0];
+
+        v_ref = Interp1(PassLine->Sref, PassLine->Vs, PassLine->N, S[0]);
+        at_ref = Interp1(PassLine->Sref, PassLine->ATs, PassLine->N, S[0]);
+        v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+
+        V[0] = Adjust(StateI->v[0], v_des, at_ref, PassLine->PTP_on);
+
+        for (int i = 1; i < out_point_num; i++)
+        {
+            St[i] = St[i - 1] + out_point_dt * V[i - 1];
+            // S[i] = StateI->s[0] + St[i];
+
+            // 对S[i]的值进行修改
+            S[i] = S[0] + St[i];
+
+            // 新增perc100时如果超出Sref[N-1]的部分路段处理
+            // S[i] = fmod(S[i], RaceLine->Sref[RaceLine->N - 1]);
+            //
+            v_ref = Interp1(PassLine->Sref, PassLine->Vs, PassLine->N, S[i]);
+            at_ref = Interp1(PassLine->Sref, PassLine->ATs, PassLine->N, S[i]);
+            v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+            V[i] = Adjust(V[i - 1], v_des, at_ref, PassLine->PTP_on);
+        }
+
+        for (int i = 0; i < out_point_num; i++)
+        {
+            sref[i] = S[i];
+            x[i] = Interp1(PassLine->Sref, PassLine->X, PassLine->N, S[i]);
+            y[i] = Interp1(PassLine->Sref, PassLine->Y, PassLine->N, S[i]);
+            angleRad[i] = Interp1(PassLine->Sref, PassLine->A, PassLine->N, S[i]);
+            angleRad[i] = wrapToPi(angleRad[i]);
+            curvature[i] = Interp1(PassLine->Sref, PassLine->K, PassLine->N, S[i]);
+            speed[i] = V[i];
+            time[i] = foresee_coeff + out_point_dt * (i - 1);
+        }
+    }
+    else
+    {
+        St[0] = foresee_coeff * StateI->v[0];
+        S[0] = StateI->s[0] + St[0];
+
+        S[0] = fmod(S[0], RaceLine->Sref[RaceLine->N - 1]);
+        v_ref = Interp1(RaceLine->Sref, RaceLine->Vs, RaceLine->N, S[0]);
+        at_ref = Interp1(RaceLine->Sref, RaceLine->ATs, RaceLine->N, S[0]);
+        v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+
+        V[0] = Adjust(StateI->v[0], v_des, at_ref, PassLine->PTP_on);
+
+        for (int i = 1; i < out_point_num; i++)
+        {
+            St[i] = St[i - 1] + out_point_dt * V[i - 1];
+            // S[i] = StateI->s[0] + St[i];
+
+            // 对S[i]的值进行修改
+            S[i] = S[0] + St[i];
+
+            // S[i] = fmod(S[i], RaceLine->Sref[RaceLine->N - 1]);
+            v_ref = Interp1(RaceLine->Sref, RaceLine->Vs, RaceLine->N, S[i]);
+            at_ref = Interp1(RaceLine->Sref, RaceLine->ATs, RaceLine->N, S[i]);
+            v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+            V[i] = Adjust(V[i - 1], v_des, at_ref, PassLine->PTP_on);
+        }
+
+        for (int i = 0; i < out_point_num; i++)
+        {
+            sref[i] = S[i];
+            x[i] = Interp1(PassLine->Sref, PassLine->X, PassLine->N, S[i]);
+            y[i] = Interp1(PassLine->Sref, PassLine->Y, PassLine->N, S[i]);
+            angleRad[i] = Interp1(PassLine->Sref, PassLine->A, PassLine->N, S[i]);
+            angleRad[i] = wrapToPi(angleRad[i]);
+            curvature[i] = Interp1(PassLine->Sref, PassLine->K, PassLine->N, S[i]);
+            speed[i] = V[i];
+            time[i] = foresee_coeff + out_point_dt * (i - 1);
+        }
+    }
+
+    // --------------------------------------------------------
+
+    // if (perc == 100) {
+    //     St[0] = foresee_coeff * StateI->v[0];
+    //     S[0] = StateI->s[0] + St[0];
+
+    //     v_ref = Interp1(PassLine->Sref, PassLine->Vs, PassLine->N, S[0]);
+    //     at_ref = Interp1(PassLine->Sref, PassLine->ATs, PassLine->N, S[0]);
+    //     v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+
+    //     V[0] = Adjust(StateI->v[0], v_des, at_ref, PassLine->PTP_on);
+
+    //     for (int i = 1; i < out_point_num; i++) {
+    //         St[i] = St[i - 1] + out_point_dt * V[i - 1];
+    //         S[i] = StateI->s[0] + St[i];
+
+    //         v_ref = Interp1(PassLine->Sref, PassLine->Vs, PassLine->N, S[i]);
+    //         at_ref = Interp1(PassLine->Sref, PassLine->ATs, PassLine->N, S[i]);
+    //         v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+    //         V[i] = Adjust(V[i - 1], v_des, at_ref, PassLine->PTP_on);
+    //     }
+
+    //     for (int i = 0; i < out_point_num; i++) {
+    //         sref[i] = S[i];
+    //         x[i] = Interp1(PassLine->Sref, PassLine->X, PassLine->N, S[i]);
+    //         y[i] = Interp1(PassLine->Sref, PassLine->Y, PassLine->N, S[i]);
+    //         angleRad[i] = Interp1(PassLine->Sref, PassLine->A, PassLine->N, S[i]);
+    //         angleRad[i] = wrapToPi(angleRad[i]);
+    //         curvature[i] = Interp1(PassLine->Sref, PassLine->K, PassLine->N, S[i]);
+    //         speed[i] = V[i];
+    //         time[i] = foresee_coeff + out_point_dt * (i - 1);
+    //     }
+
+    // } else {
+    //     St[0] = foresee_coeff * StateI->v[0];
+    //     S[0] = StateI->s[0] + St[0];
+
+    //     S[0] = fmod(S[0], RaceLine->Sref[RaceLine->N - 1]);
+    //     v_ref = Interp1(RaceLine->Sref, RaceLine->Vs, RaceLine->N, S[0]);
+    //     at_ref = Interp1(RaceLine->Sref, RaceLine->ATs, RaceLine->N, S[0]);
+    //     // v_des = ((v_ref >= rc_vel) ? rc_vel : v_ref) * perc * 0.01;
+    //     v_des = ((v_ref * perc * 0.01 >= rc_vel) ? rc_vel : v_ref * perc * 0.01);
+
+    //     V[0] = Adjust(StateI->v[0], v_des, at_ref, PassLine->PTP_on);
+
+    //     for (int i = 1; i < out_point_num; i++) {
+    //         St[i] = St[i - 1] + out_point_dt * V[i - 1];
+    //         S[i] = StateI->s[0] + St[i];
+
+    //         S[i] = fmod(S[i], RaceLine->Sref[RaceLine->N - 1]);
+    //         v_ref = Interp1(RaceLine->Sref, RaceLine->Vs, RaceLine->N, S[i]);
+    //         at_ref = Interp1(RaceLine->Sref, RaceLine->ATs, RaceLine->N, S[i]);
+    //         v_des = ((v_ref * perc * 0.01 >= rc_vel) ? rc_vel : v_ref * perc * 0.01);
+    //         V[i] = Adjust(V[i - 1], v_des, at_ref, PassLine->PTP_on);
+    //     }
+
+    //     for (int i = 0; i < out_point_num; i++) {
+    //         sref[i] = S[i];
+    //         x[i] = Interp1(PassLine->Sref, PassLine->X, PassLine->N, S[i]);
+    //         y[i] = Interp1(PassLine->Sref, PassLine->Y, PassLine->N, S[i]);
+    //         angleRad[i] = Interp1(PassLine->Sref, PassLine->A, PassLine->N, S[i]);
+    //         angleRad[i] = wrapToPi(angleRad[i]);
+    //         curvature[i] = Interp1(PassLine->Sref, PassLine->K, PassLine->N, S[i]);
+    //         speed[i] = V[i];
+    //         time[i] = foresee_coeff + out_point_dt * (i - 1);
+    //     }
+    // }
+
+    return local_optimizer_result;
+}
+
+/* Global Trajectory Optimization */
+int OptPlanner::globalOptimize() {
+    int global_opt_ret = TrajOptGlobal();
+
+    // printf("Global LapTime: %.2f s\n", RaceLine->TIME[RaceLine->N - 1]);
+
+    return global_opt_ret;
+}
+
+/* Local Trajectory Optimization */
+int OptPlanner::localOptimize(int flag_race_left_right) {
+    // x = std::vector<double>(PassLine->X.begin(), PassLine->X.begin() + limit);
+    // y = std::vector<double>(PassLine->Y.begin(), PassLine->Y.begin() + limit);
+    // angleRad = std::vector<double>(PassLine->A.begin(), PassLine->A.begin() + limit);
+    // curvature = std::vector<double>(PassLine->K.begin(), PassLine->K.begin() + limit);
+    // speed = std::vector<double>(PassLine->Vs.begin(), PassLine->Vs.begin() + limit);
+    // time = std::vector<double>(PassLine->TIME.begin(), PassLine->TIME.begin() + limit);
+
+    int local_opt_ret = TrajOptLocal(flag_race_left_right);
+
+    // printf("Local LapTime: %.2f s\n", PassLine->TIME[PassLine->N - 1]);
+
+    return local_opt_ret;
+}
+
+int OptPlanner::TrajOptGlobal() {
+    int i, flag = 0;
+
+    /* Reference Line */
+    RaceLine->N = BaseLine->N;
+    RaceLine->Dsafe = 1.51;
+    RaceLine->PTP_on = 0;
+
+    for (i = 0; i < RaceLine->N; i++) {
+        RaceLine->Sref[i] = BaseLine->Sref[i];
+        RaceLine->Xref[i] = BaseLine->Xref[i];
+        RaceLine->Yref[i] = BaseLine->Yref[i];
+        RaceLine->Aref[i] = BaseLine->Aref[i];
+        RaceLine->Kref[i] = BaseLine->Kref[i];
+        RaceLine->Lmax[i] = BaseLine->Lmax[i];
+        RaceLine->Lmin[i] = BaseLine->Lmin[i];
+    }
+
+    /* Path Optimization */
+    flag = PathOptGlobal();
+
+#ifdef VIS_ON
+    if (flag == 0)
+        printf("\nPath Optimization Successfully!\n");
+    else
+        printf("\nPath Optimization Failed!\n");
+#endif
+
+    /* Velocity Optimization */
+    if (flag == 0) {
+        flag = VelOptGlobal();
+
+#ifdef VIS_ON
+        if (flag == 0)
+            printf("\nVelocity Optimization Successfully!\n");
+        else
+            printf("\nVelocity Optimization Failed!\n");
+#endif
+    }
+
+    /* Velocity Simulation */
+    if (flag == 0) {
+        VelSim(RaceLine);
+        RaceLine->V[0] = RaceLine->Vs[RaceLine->N - 1];
+        VelSim(RaceLine);
+    }
+
+    return flag;
+}
+
+/* =============== PathOptGlobal.c =============== */
+int OptPlanner::PathOptGlobal() {
+    /* =============== Data Structure =============== */
+    int i, p, flag, iter;
+    int N = RaceLine->N, nx = 2, nu = 2, nv = nx + nu;
+    int ele, rowsA, rowsG, LPnum = 2;
+    double Rscale, Gearth, r_scale, v_scale, a_scale;
+    double vref, temp, l_diff, a_diff, dx, dy;
+
+    int dimn, dimm, dimp, diml, dimq;
+    double *ecos_c, *ecos_b, *ecos_h, *ecos_Apr, *ecos_Gpr;
+    int *ecos_q, *ecos_Ajc, *ecos_Gjc, *ecos_Air, *ecos_Gir;
+
+    pwork *mywork;
+    idxint exitflag = ECOS_FATAL;
+    idxint keepvars = 0;
+
+    ele = N * nv;
+    rowsA = nx + (N - 1) * nx;
+    rowsG = N * LPnum + N * 3;
+
+    std::vector<double> ds(N), K(N), Lmax(N), Lmin(N), res(ele);
+    std::vector<double> l(N), a(N), lk(N), ak(N);
+    std::vector<int> q(N);
+
+    std::vector<double> Gpr, Apr;
+    std::vector<int> Gjc, Gir, Ajc, Air;
+
+    MatrixXd A = MatrixXd::Zero(rowsA, ele);
+    MatrixXd G = MatrixXd::Zero(rowsG, ele);
+    VectorXd b = VectorXd::Zero(rowsA);
+    VectorXd h = VectorXd::Zero(rowsG);
+    VectorXd c = VectorXd::Zero(ele);
+
+    MatrixXd A1 = MatrixXd::Zero(nx, nx);
+    MatrixXd A2 = MatrixXd::Zero(nx, nx);
+    MatrixXd B1 = MatrixXd::Zero(nx, nu);
+    MatrixXd B2 = MatrixXd::Zero(nx, nu);
+    VectorXd b1 = VectorXd::Zero(nx, 1);
+    VectorXd b2 = VectorXd::Zero(nx, 1);
+    MatrixXd eye = MatrixXd::Identity(nx, nx);
+
+    /* ================ Parameters ================ */
+    /* Physical Parameters */
+    Rscale = 100;
+    Gearth = 9.807;
+
+    /* Scale Variables */
+    r_scale = Rscale;
+    v_scale = sqrt(Rscale * Gearth);
+    a_scale = Gearth;
+
+    /* ================ Initial Profile ================ */
+    for (i = 0; i < N - 1; i++) {
+        ds[i] = RaceLine->Sref[i + 1] - RaceLine->Sref[i];
+        ds[i] /= r_scale;
+    }
+
+    for (i = 0; i < N; i++) {
+        K[i] = RaceLine->Kref[i] * r_scale;
+        Lmax[i] = (RaceLine->Lmax[i] - RaceLine->Dsafe) / r_scale;
+        Lmin[i] = (RaceLine->Lmin[i] + RaceLine->Dsafe) / r_scale;
+        lk[i] = 0.0;
+        ak[i] = 0.0;
+    }
+
+    vref = 10.0 / v_scale;
+
+    /* ================ Optimization ================ */
+    flag = 1;
+    iter = 1;
+    while (flag == 1) {
+        /* Initinal Constraints */
+        // F = F + (y(1) == y(N * nv + 1));
+        A(0, 0) = 1;
+        A(0, (N - 1) * nv + 0) = -1;
+        b(0) = 0;
+
+        // F = F + (y(2) == y(N * nv + 2));
+        A(1, 1) = 1;
+        A(1, (N - 1) * nv + 1) = -1;
+        b(1) = 0;
+
+        /* Equality Constraints (Dynamics) */
+        p = nx;
+        for (i = 0; i < N - 1; i++) {
+            Linear(K[i], vref, lk[i], ak[i], A1, B1, b1);
+            Linear(K[i + 1], vref, lk[i + 1], ak[i + 1], A2, B2, b2);
+
+            A.block(p + i * nx, i * nv, nx, 2) = A1 * ds[i] / 2 + eye;
+            A.block(p + i * nx, (i + 1) * nv, nx, 2) = A2 * ds[i] / 2 - eye;
+            A.block(p + i * nx, i * nv + 2, nx, 2) = B1 * ds[i] / 2;
+            A.block(p + i * nx, (i + 1) * nv + 2, nx, 2) = B2 * ds[i] / 2;
+            b.segment(p + i * nx, nx) = -(b1 + b2) * ds[i] / 2;
+        }
+
+        DenseToSparseCCS(A, Ajc, Air, Apr);
+
+        /* Inequality Constraints */
+        for (i = 0; i < N; i++) {
+            // F = F + (y(i, 1) >= lmin);
+            G(i * LPnum + 0, i * nv + 0) = -1.0;
+            h(i * LPnum + 0) = -Lmin[i];
+
+            // F = F + (y(i, 1) <= lmax);
+            G(i * LPnum + 1, i * nv + 0) = 1.0;
+            h(i * LPnum + 1) = Lmax[i];
+        }
+
+        p = N * LPnum;
+        for (i = 0; i < N; i++) {
+            // F = F + (y(i, 3)*y(i, 3) <= y(i, 4));
+            G(p + i * 3 + 0, i * nv + 3) = -1.0 / sqrt(2);
+            G(p + i * 3 + 1, i * nv + 3) = -1.0 / sqrt(2);
+            G(p + i * 3 + 2, i * nv + 2) = -1.0;
+
+            h(p + i * 3 + 0) = 1.0 / (2 * sqrt(2));
+            h(p + i * 3 + 1) = -1.0 / (2 * sqrt(2));
+            h(p + i * 3 + 2) = 0.0;
+        }
+
+        DenseToSparseCCS(G, Gjc, Gir, Gpr);
+
+        /* Objective Function */
+        for (i = 0; i < N; i++)
+            c(i * nv + 3) = 10.0;
+
+        /* Conic Cone Structure */
+        for (i = 0; i < N; i++)
+            q[i] = 3;
+
+        /* Preparation for ECOS */
+        dimn = ele;
+        dimm = rowsG;
+        dimp = rowsA;
+        diml = N * LPnum;
+        dimq = N;
+
+        ecos_c = c.data();
+        ecos_b = b.data();
+        ecos_h = h.data();
+        ecos_Gpr = Gpr.data();
+        ecos_Gjc = Gjc.data();
+        ecos_Gir = Gir.data();
+        ecos_Apr = Apr.data();
+        ecos_Ajc = Ajc.data();
+        ecos_Air = Air.data();
+        ecos_q = q.data();
+
+        mywork = ECOS_setup(dimn, dimm, dimp, diml, dimq, ecos_q, 0, ecos_Gpr, ecos_Gjc, ecos_Gir, ecos_Apr, ecos_Ajc, ecos_Air, ecos_c, ecos_h, ecos_b);
+
+        /* Solution by ECOS */
+        exitflag = ECOS_solve(mywork);
+        for (i = 0; i < ele; i++)
+            res[i] = mywork->x[i];
+
+        /* CleanUp */
+        ECOS_cleanup(mywork, keepvars);
+
+        /* Compute Difference between Iteration */
+        for (i = 0; i < N; i++) {
+            l[i] = res[i * nv + 0];
+            a[i] = res[i * nv + 1];
+        }
+
+        l_diff = 0.0;
+        a_diff = 0.0;
+        for (i = 0; i < N; i++) {
+            temp = fabs(l[i] - lk[i]);
+            if (temp > l_diff)
+                l_diff = temp;
+
+            temp = fabs(a[i] - ak[i]);
+            if (temp > a_diff)
+                a_diff = temp;
+        }
+        l_diff *= r_scale;
+        a_diff *= 180 / M_PI;
+
+#ifdef VIS_ON
+        printf("Current iterations: %d\n", iter);
+        printf("dl: %.2f m, da: %.2f deg.\n", l_diff, a_diff);
+#endif
+
+        /* Check Convergence */
+        if (iter > 10 || (l_diff <= 1E-2 && a_diff <= 1E-2)) {
+            flag = 0;
+        } else {
+            for (i = 0; i < N; i++) {
+                lk[i] = l[i];
+                ak[i] = a[i];
+            }
+            iter = iter + 1;
+        }
+    }
+
+    /* =============== Result =============== */
+    for (i = 0; i < N; i++) {
+        RaceLine->L[i] = res[i * nv + 0] * r_scale;
+        RaceLine->dA[i] = res[i * nv + 1];
+        RaceLine->K[i] = res[i * nv + 2] / (vref * vref) / r_scale;
+        RaceLine->A[i] = RaceLine->Aref[i] + RaceLine->dA[i];
+        RaceLine->X[i] = RaceLine->Xref[i] + RaceLine->L[i] * cos(RaceLine->Aref[i] + M_PI / 2);
+        RaceLine->Y[i] = RaceLine->Yref[i] + RaceLine->L[i] * sin(RaceLine->Aref[i] + M_PI / 2);
+    }
+
+    RaceLine->S[0] = 0.0;
+    for (i = 0; i < N - 1; i++) {
+        dx = RaceLine->X[i + 1] - RaceLine->X[i];
+        dy = RaceLine->Y[i + 1] - RaceLine->Y[i];
+        RaceLine->S[i + 1] = RaceLine->S[i] + sqrt(dx * dx + dy * dy);
+    }
+    RaceLine->PathFlag = exitflag;
+
+    if (exitflag == 0 || exitflag == 10)
+        return 0;
+    else
+        return 1;
+}
+
+/* =============== VelOptGlocal.c =============== */
+int OptPlanner::VelOptGlobal() {
+    /* =============== Data Structure =============== */
+    int i, p;
+    int N = RaceLine->N, nx = 1, nu = 1, nv = nx + nu;
+    int ele, rowsA, rowsG, LPnum = 11;
+    double Rscale, Gearth, r_scale, v_scale, a_scale;
+    double Vmax, Vmin, Cw_diff, Cw0_1, Cw2_1, Cw0_2, Cw2_2, Ce0, Ce2;
+    double Cn_diff, Cn0_1, Cn2_1, Cn0_2, Cn2_2, Cn0_3, Cn2_3, Cn0_4, Cn2_4;
+
+    int dimn, dimm, dimp, diml, dimq;
+    double *ecos_c, *ecos_b, *ecos_h, *ecos_Apr, *ecos_Gpr;
+    int *ecos_Ajc, *ecos_Gjc, *ecos_Air, *ecos_Gir;
+
+    pwork *mywork;
+    idxint exitflag = ECOS_FATAL;
+    idxint keepvars = 0;
+
+    ele = N * nv;
+    rowsA = nx + (N - 1) * nx;
+    rowsG = N * LPnum;
+
+    std::vector<double> ds(N), K(N), res(ele);
+    std::vector<double> Gpr, Apr;
+    std::vector<int> Gjc, Gir, Ajc, Air;
+
+    MatrixXd A = MatrixXd::Zero(rowsA, ele);
+    MatrixXd G = MatrixXd::Zero(rowsG, ele);
+    VectorXd b = VectorXd::Zero(rowsA);
+    VectorXd h = VectorXd::Zero(rowsG);
+    VectorXd c = VectorXd::Zero(ele);
+
+    /* ================ Parameters ================ */
+    /* Physical Parameters */
+    Rscale = 100;
+    Gearth = 9.807;
+
+    /* Scale Variables */
+    r_scale = Rscale;
+    v_scale = sqrt(Rscale * Gearth);
+    a_scale = Gearth;
+
+    /* Physical Parameters of Vehicle */
+    Vmax = _v_max / v_scale;
+    Vmin = 0.0 / v_scale;
+
+    /* Constraints on At */
+    Cw_diff = overtake_coeff_cw;
+    Cw0_1 = ((9.3927378534586872) - Cw_diff) / a_scale;
+    Cw2_1 = (0.0029555400296912) * r_scale;
+    Cw0_2 = ((10.4467932456732253) - Cw_diff) / a_scale;
+    Cw2_2 = (0.0023257377381671) * r_scale;
+
+    if (RaceLine->PTP_on == 1) {
+        Ce0 = (18.6636650349874209) / a_scale;
+        Ce2 = (-0.0028073357257396) * r_scale;
+    } else {
+        Ce0 = (16.8777023207990844) / a_scale;
+        Ce2 = (-0.0030493152004459) * r_scale;
+    }
+
+    /* Constraints on An */
+    Cn_diff = overtake_coeff_cn;
+    Cn0_1 = ((10.5556519772897399) - Cn_diff) / a_scale;
+    Cn2_1 = (0.0085685315600145) * r_scale;
+    Cn0_2 = ((12.9434316702354657) - Cn_diff) / a_scale;
+    Cn2_2 = (0.0046548389863174) * r_scale;
+    Cn0_3 = ((15.2934779420126024) - Cn_diff) / a_scale;
+    Cn2_3 = (0.0031910503440862) * r_scale;
+    Cn0_4 = ((17.6827477139429803) - Cn_diff) / a_scale;
+    Cn2_4 = (0.0024269436469385) * r_scale;
+
+    /* ================ Initial Profile ================ */
+    for (i = 0; i < N - 1; i++) {
+        ds[i] = RaceLine->S[i + 1] - RaceLine->S[i];
+        ds[i] /= r_scale;
+    }
+
+    for (i = 0; i < N; i++) {
+        K[i] = fabs(RaceLine->K[i]) * r_scale;
+    }
+
+    /* ================ Optimization ================ */
+    /* Initinal Constraints */
+    // F = F + (y(1) == y(N * nx + 1));
+    A(0, 0) = 1;
+    A(0, (N - 1) * nv + 0) = -1;
+    b(0) = 0;
+
+    /* Equality Constraints (Dynamics) */
+    p = nx;
+    for (i = 0; i < N - 1; i++) {
+        A(p + i, i * nv + 0) = 1 - 2 * Vehicle->CD * r_scale / Vehicle->Mass * ds[i];
+        A(p + i, (i + 1) * nv + 0) = -1;
+        A(p + i, i * nv + 1) = 2 * ds[i];
+        b(p + i) = 0;
+    }
+
+    DenseToSparseCCS(A, Ajc, Air, Apr);
+
+    /* Inequality Constraints */
+    for (i = 0; i < N; i++) {
+        // F = F + (y(i, 1) >= VELmin*VELmin);
+        G(LPnum * i + 0, i * nv + 0) = -1;
+        h(LPnum * i + 0) = -Vmin * Vmin;
+
+        // F = F + (y(i, 1) <= VELmax*VELmax);
+        G(LPnum * i + 1, i * nv + 0) = 1;
+        h(LPnum * i + 1) = Vmax * Vmax;
+
+        // F = F + (y(i, 2) >= -Cw0 - Cw2 * y(i, 1));
+        G(LPnum * i + 2, i * nv + 0) = -Cw2_1;
+        G(LPnum * i + 2, i * nv + 1) = -1;
+        h(LPnum * i + 2) = Cw0_1;
+
+        // F = F + (y(i, 2) >= -Cw0 - Cw2 * y(i, 1));
+        G(LPnum * i + 3, i * nv + 0) = -Cw2_2;
+        G(LPnum * i + 3, i * nv + 1) = -1;
+        h(LPnum * i + 3) = Cw0_2;
+
+        // F = F + (y(i, 2) <= Cw0 + Cw2 * y(i, 1));
+        G(LPnum * i + 4, i * nv + 0) = -Cw2_1;
+        G(LPnum * i + 4, i * nv + 1) = 1;
+        h(LPnum * i + 4) = Cw0_1;
+
+        // F = F + (y(i, 2) <= Cw0 + Cw2 * y(i, 1));
+        G(LPnum * i + 5, i * nv + 0) = -Cw2_2;
+        G(LPnum * i + 5, i * nv + 1) = 1;
+        h(LPnum * i + 5) = Cw0_2;
+
+        // F = F + (y(i, 2) <= Ce0 + Ce2 * y(i, 1));
+        G(LPnum * i + 6, i * nv + 0) = -Ce2;
+        G(LPnum * i + 6, i * nv + 1) = 1;
+        h(LPnum * i + 6) = Ce0;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        h(LPnum * i + 7) = Cn0_1;
+        G(LPnum * i + 7, i * nv + 0) = K[i] - Cn2_1;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 8, i * nv + 0) = K[i] - Cn2_2;
+        h(LPnum * i + 8) = Cn0_2;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 9, i * nv + 0) = K[i] - Cn2_3;
+        h(LPnum * i + 9) = Cn0_3;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 10, i * nv + 0) = K[i] - Cn2_4;
+        h(LPnum * i + 10) = Cn0_4;
+    }
+
+    DenseToSparseCCS(G, Gjc, Gir, Gpr);
+
+    /* Objective Function */
+    for (i = 0; i < N; i++)
+        c(i * nv + 0) = -1.0;
+
+    /* Preparation for ECOS */
+    dimn = ele;
+    dimm = rowsG;
+    dimp = rowsA;
+    diml = N * LPnum;
+    dimq = 0;
+
+    ecos_c = c.data();
+    ecos_b = b.data();
+    ecos_h = h.data();
+    ecos_Gpr = Gpr.data();
+    ecos_Gjc = Gjc.data();
+    ecos_Gir = Gir.data();
+    ecos_Apr = Apr.data();
+    ecos_Ajc = Ajc.data();
+    ecos_Air = Air.data();
+
+    mywork = ECOS_setup(dimn, dimm, dimp, diml, dimq, NULL, 0, ecos_Gpr, ecos_Gjc, ecos_Gir, ecos_Apr, ecos_Ajc, ecos_Air, ecos_c, ecos_h, ecos_b);
+
+    /* Solution by ECOS */
+    exitflag = ECOS_solve(mywork);
+    for (i = 0; i < ele; i++)
+        res[i] = mywork->x[i];
+
+    /* CleanUp */
+    ECOS_cleanup(mywork, keepvars);
+
+    /* =============== Result =============== */
+    for (i = 0; i < N; i++) {
+        RaceLine->V[i] = sqrt(res[i * nv + 0]) * v_scale;
+        RaceLine->AN[i] = RaceLine->K[i] * RaceLine->V[i] * RaceLine->V[i];
+        RaceLine->AT[i] = res[i * nv + 1] * a_scale;
+    }
+    RaceLine->AT[N - 1] = RaceLine->AT[N - 2];
+
+    if (exitflag == 0 || exitflag == 10)
+        return 0;
+    else
+        return 1;
+}
+
+/* =============== TrajOptLocal.c =============== */
+int OptPlanner::TrajOptLocal(int flag_race_left_right) {
+    std::shared_ptr<TRAJdata> Select_RaceLine;
+
+    Select_RaceLine = RaceLine;
+    double dp = 300.0;
+    // if (flag_race_left_right == 5) {
+    //     Select_RaceLine = RaceLineLeft;
+    //     dp = 50.0;
+    // } else {
+    //     Select_RaceLine = RaceLine;
+    //     dp = 300.0;
+    // }
+
+    int i, j, flag = 0, N = Select_RaceLine->N, mode = 2;
+    double Se, Le, Si, dS, Lr, Rr, LapLength, Wsafe;
+
+    std::vector<double> Lmax(N), Lmin(N);
+    std::shared_ptr<STATE> StateF = std::make_shared<STATE>();
+
+    StateF->N = 1;
+    StateF->s = std::vector<double>(StateF->N);
+    StateF->l = std::vector<double>(StateF->N);
+    StateF->x = std::vector<double>(StateF->N);
+    StateF->y = std::vector<double>(StateF->N);
+    StateF->a = std::vector<double>(StateF->N);
+    StateF->da = std::vector<double>(StateF->N);
+    StateF->v = std::vector<double>(StateF->N);
+
+    /* Get Track Coordinate */
+    StateTrans(StateI, Select_RaceLine);
+    if (StateE->N > 0) {
+        StateTrans(StateE, Select_RaceLine);
+    }
+
+    /* Boundary Modification */
+    LapLength = Select_RaceLine->Sref[N - 1];
+    for (i = 0; i < N; i++) {
+        Lmin[i] = Select_RaceLine->Lmin[i];
+        Lmax[i] = Select_RaceLine->Lmax[i];
+    }
+
+    if (StateE->N > 0) {
+        for (j = 0; j < StateE->N; j++) {
+#ifdef PRE_ON
+            if (StateI->v[0] > StateE->v[j]) {
+                dS = StateE->v[j] * (StateE->s[j] - StateI->s[0]) / (StateI->v[0] - StateE->v[j]);
+                if (dS > 50.0)
+                    dS = 50.0;
+            } else
+                dS = 0.0;
+
+            Se = fmod(StateE->s[j] + dS, LapLength);
+            Le = Interp1(Select_RaceLine->Sref, Select_RaceLine->L, Select_RaceLine->N, Se);
+#else
+            Se = fmod(StateE->s[j], LapLength);
+            Le = StateE->l[j];
+#endif
+
+            Lr = Interp1(Select_RaceLine->Sref, Select_RaceLine->Lmax, Select_RaceLine->N, Se);
+            Rr = Interp1(Select_RaceLine->Sref, Select_RaceLine->Lmin, Select_RaceLine->N, Se);
+
+
+            if (StateE->v[j] < 3.0)
+            {
+                Wsafe = 3.0 ;
+            }
+            else if (StateE->v[j] > 5.3)
+            {
+                Wsafe = 5.3;
+            }
+            else {
+                Wsafe = StateE->v[j] ; // 这里是敌方车辆的宽度
+            }
+            
+            for (i = 0; i < Select_RaceLine->N; i++) {
+                if (fmod(Se, LapLength) > Select_RaceLine->Sref[0] && fmod(Se, LapLength) < Select_RaceLine->Sref[0] + 15) {
+                    if ((Select_RaceLine->Sref[i] >= Se - 10 && Select_RaceLine->Sref[i] <= Select_RaceLine->Sref[N - 1]) || (Select_RaceLine->Sref[i] >= Select_RaceLine->Sref[0] && Select_RaceLine->Sref[i] <= fmod(Se + 15, LapLength))) {
+                        if (fabs(Lr - Le) > fabs(Le - Rr))
+                            Lmin[i] = Le + Wsafe;
+                        else
+                            Lmax[i] = Le - Wsafe;
+                    }
+                } else if (fmod(Se, LapLength) > Select_RaceLine->Sref[N - 1] - 10 && fmod(Se, LapLength) < Select_RaceLine->Sref[N - 1]) {
+                    if ((Select_RaceLine->Sref[i] >= fmod(Se - 10, LapLength) && Select_RaceLine->Sref[i] <= Select_RaceLine->Sref[N - 1]) || (Select_RaceLine->Sref[i] >= Select_RaceLine->Sref[0] && Select_RaceLine->Sref[i] <= Se + 15)) {
+                        if (fabs(Lr - Le) > fabs(Le - Rr))
+                            Lmin[i] = Le + Wsafe;
+                        else
+                            Lmax[i] = Le - Wsafe;
+                    }
+                } else {
+                    if (Select_RaceLine->Sref[i] >= Se - 10 && Select_RaceLine->Sref[i] <= Se + 15) {
+                        if (fabs(Lr - Le) > fabs(Le - Rr))
+                            Lmin[i] = Le + Wsafe;
+                        else
+                            Lmax[i] = Le - Wsafe;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Preparation for Optimization */
+
+    // If external terminal override enabled, plan from current s to terminal_s (handle wrap-around)
+    if (terminal_enable) {
+        double S0 = StateI->s[0];
+        double St = terminal_s;
+        double dp_tmp = fmod((St - S0 + LapLength), LapLength);
+        if (dp_tmp <= 1e-6) {
+            // if equal (or too small), use full lap
+            dp_tmp = LapLength;
+        }
+        dp = dp_tmp;
+    }
+
+    N = PassLine->N;
+    for (i = 0; i < N; i++) {
+        PassLine->Sref[i] = StateI->s[0] + dp / (N - 1) * i;
+        // PassLine->Sref[i] = fmod((StateI->s[0] + dp / (N - 1) * i), LapLength);
+    }
+
+    for (i = 0; i < N; i++) {
+        Si = fmod(PassLine->Sref[i], LapLength);
+
+        PassLine->Xref[i] = Interp1(Select_RaceLine->Sref, Select_RaceLine->Xref, Select_RaceLine->N, Si);
+        PassLine->Yref[i] = Interp1(Select_RaceLine->Sref, Select_RaceLine->Yref, Select_RaceLine->N, Si);
+        PassLine->Aref[i] = Interp1(Select_RaceLine->Sref, Select_RaceLine->Aref, Select_RaceLine->N, Si);
+        PassLine->Kref[i] = Interp1(Select_RaceLine->Sref, Select_RaceLine->Kref, Select_RaceLine->N, Si);
+        PassLine->Lmin[i] = Interp1(Select_RaceLine->Sref, Lmin, Select_RaceLine->N, Si);
+        PassLine->Lmax[i] = Interp1(Select_RaceLine->Sref, Lmax, Select_RaceLine->N, Si);
+
+        // 提取最优赛车线相对于中心线的横向和航向偏差，作为局部优化的跟踪目标
+        PassLine->L[i] = Interp1(Select_RaceLine->Sref, Select_RaceLine->L, Select_RaceLine->N, Si);
+        PassLine->dA[i] = Interp1(Select_RaceLine->Sref, Select_RaceLine->dA, Select_RaceLine->N, Si);
+    }
+
+    for (i = 1; i < N; i++) {
+        PassLine->Aref[i] = wrapToFirstAngle(PassLine->Aref[0], PassLine->Aref[i]);
+    }
+
+    /* Terminal Conditions */
+    Si = fmod(PassLine->Sref[N - 1], LapLength);
+    if (terminal_enable) {
+        // Use external terminal values. Convert terminal_A (global angle) to da relative to reference angle at Si.
+        StateF->l[0] = terminal_l;
+        double Aref_term = Interp1(Select_RaceLine->Sref, Select_RaceLine->Aref, Select_RaceLine->N, Si);
+        StateF->da[0] = wrapToPi(terminal_A - Aref_term);
+        StateF->v[0] = terminal_v;
+
+        // terminal override: enforce hard terminal constraints (l/da equality)
+        mode = 1;
+    } else {
+        StateF->l[0] = Interp1(Select_RaceLine->Sref, Select_RaceLine->L, Select_RaceLine->N, Si);
+        StateF->da[0] = Interp1(Select_RaceLine->Sref, Select_RaceLine->dA, Select_RaceLine->N, Si);
+        StateF->v[0] = Interp1(Select_RaceLine->Sref, Select_RaceLine->Vs, Select_RaceLine->N, Si);
+
+        // default local planning keeps relaxed terminal mode
+        mode = 2;
+    }
+
+    /* Path Optimization */
+    flag = PathOptLocal(StateF, mode);
+
+#ifdef VIS_ON
+    if (flag == 0) {
+        printf("\nPath Optimization Successfully!\n");
+    } else {
+        printf("\nPath Optimization Failed!\n");
+    }
+#endif
+
+    /* Velocity Optimization */
+    if (flag == 0) {
+        if (vel_planner_method == 1) {
+            // FB 模式下，用 RaceLine 参考速度初始化 PassLine->Vs[0]，
+            // 避免 Vs[0] 残留为 0 导致 FB 前向积分从极低速起步
+            double s0_mod = fmod(StateI->s[0], LapLength);
+            double v_ref_init = Interp1(Select_RaceLine->Sref, Select_RaceLine->Vs,
+                                        Select_RaceLine->N, s0_mod);
+            // 取真实车速和参考线速度中的较大者，确保不为零
+            PassLine->Vs[0] = std::max({StateI->v[0], v_ref_init, 0.1});
+            flag = VelOptForwardBackward(StateF, mode);
+        } else {
+            flag = VelOptLocalR(StateF, mode);
+        }
+
+#ifdef VIS_ON
+        if (flag == 0) {
+            printf("\nVelocity Optimization Successfully!\n");
+        } else {
+            printf("\nVelocity Optimization Failed!\n");
+        }
+#endif
+    }
+
+    /* Velocity Simulation */
+    // 这里修改为了取消矫正
+    // -------------原始版本，注释掉-------------
+    if (flag == 0) {
+        VelSim(PassLine);
+    }
+
+    local_optimizer_result = flag;
+    return flag;
+}
+
+/* =============== PathOptLocal.c =============== */
+int OptPlanner::PathOptLocal(const std::shared_ptr<STATE> StateF, int mode) {
+    /* =============== Data Structure =============== */
+    int i, p, flag, iter;
+    int N = PassLine->N, nx = 2, nu = 2, nv = nx + nu;
+    int ele, rowsA, rowsG, LPnum = 2;
+    double Rscale, Gearth, r_scale, v_scale, a_scale;
+    double vref, dl0, dlf, da0, daf, temp, l_diff, a_diff, dx, dy;
+
+    int dimn, dimm, dimp, diml, dimq;
+    double *ecos_c, *ecos_b, *ecos_h, *ecos_Apr, *ecos_Gpr;
+    int *ecos_q, *ecos_Ajc, *ecos_Gjc, *ecos_Air, *ecos_Gir;
+
+    pwork *mywork;
+    idxint exitflag = ECOS_FATAL;
+    idxint keepvars = 0;
+
+    if (mode == 1) {
+        ele = N * nv;
+        rowsA = 2 * nx + (N - 1) * nx;
+        rowsG = N * LPnum + N * 3;
+    } else if (mode == 2) {
+        ele = N * nv + 2;
+        rowsA = nx + (N - 1) * nx;
+        rowsG = N * LPnum + 4 + N * 3;
+    } else {
+        printf("Error Mode!\n");
+        return -1;
+    }
+
+    std::vector<double> ds(N), K(N), Lmax(N), Lmin(N), res(ele);
+    std::vector<double> l(N), a(N), lk(N), ak(N);
+    std::vector<int> q(N);
+
+    std::vector<double> Gpr, Apr;
+    std::vector<int> Gjc, Gir, Ajc, Air;
+
+    MatrixXd A = MatrixXd::Zero(rowsA, ele);
+    MatrixXd G = MatrixXd::Zero(rowsG, ele);
+    VectorXd b = VectorXd::Zero(rowsA);
+    VectorXd h = VectorXd::Zero(rowsG);
+    VectorXd c = VectorXd::Zero(ele);
+
+    MatrixXd A1 = MatrixXd::Zero(nx, nx);
+    MatrixXd A2 = MatrixXd::Zero(nx, nx);
+    MatrixXd B1 = MatrixXd::Zero(nx, nu);
+    MatrixXd B2 = MatrixXd::Zero(nx, nu);
+    VectorXd b1 = VectorXd::Zero(nx, 1);
+    VectorXd b2 = VectorXd::Zero(nx, 1);
+    MatrixXd eye = MatrixXd::Identity(nx, nx);
+
+    /* ================ Parameters ================ */
+    /* Physical Parameters */
+    Rscale = 100;
+    Gearth = 9.807;
+
+    /* Scale Variables */
+    r_scale = Rscale;
+    v_scale = sqrt(Rscale * Gearth);
+    a_scale = Gearth;
+
+    /* Initial Conditions */
+    dl0 = StateI->l[0] / r_scale;
+    da0 = StateI->da[0];
+
+    /* Terminal Conditions */
+    dlf = StateF->l[0] / r_scale;
+    daf = StateF->da[0];
+
+    /* ================ Initial Profile ================ */
+    for (i = 0; i < N - 1; i++) {
+        ds[i] = PassLine->Sref[i + 1] - PassLine->Sref[i];
+        ds[i] /= r_scale;
+    }
+
+    for (i = 0; i < N; i++) {
+        K[i] = PassLine->Kref[i] * r_scale;
+        Lmax[i] = (PassLine->Lmax[i] - PassLine->Dsafe) / r_scale;
+        Lmin[i] = (PassLine->Lmin[i] + PassLine->Dsafe) / r_scale;
+        lk[i] = 0.0;
+        ak[i] = 0.0;
+    }
+
+    vref = 10.0 / v_scale;
+
+    if (dl0 > Lmax[0])
+        dl0 = Lmax[0];
+    if (dl0 < Lmin[0])
+        dl0 = Lmin[0];
+
+    /* ================ Optimization ================ */
+    flag = 1;
+    iter = 1;
+    while (flag == 1) {
+        /* Initinal Constraints */
+        // F = F + (y(1) == dl0);
+        A(0, 0) = 1;
+        b(0) = dl0;
+
+        // F = F + (y(2) == da0);
+        A(1, 1) = 1;
+        b(1) = da0;
+
+        /* Equality Constraints (Dynamics) */
+        p = nx;
+        for (i = 0; i < N - 1; i++) {
+            Linear(K[i], vref, lk[i], ak[i], A1, B1, b1);
+            Linear(K[i + 1], vref, lk[i + 1], ak[i + 1], A2, B2, b2);
+
+            A.block(p + i * nx, i * nv, nx, 2) = A1 * ds[i] / 2 + eye;
+            A.block(p + i * nx, (i + 1) * nv, nx, 2) = A2 * ds[i] / 2 - eye;
+            A.block(p + i * nx, i * nv + 2, nx, 2) = B1 * ds[i] / 2;
+            A.block(p + i * nx, (i + 1) * nv + 2, nx, 2) = B2 * ds[i] / 2;
+            b.segment(p + i * nx, nx) = -(b1 + b2) * ds[i] / 2;
+        }
+
+        /* Terminal Constraints */
+        if (mode == 1) {
+            p = p + (N - 1) * nx;
+
+            // F = F + (y(N * nx + 1) == dlf);
+            A(p + 0, (N - 1) * nv + 0) = 1;
+            b(p + 0) = dlf;
+
+            // F = F + (y(N * nx + 2) == daf);
+            A(p + 1, (N - 1) * nv + 1) = 1;
+            b(p + 1) = daf;
+        }
+
+        DenseToSparseCCS(A, Ajc, Air, Apr);
+
+        /* Inequality Constraints */
+        for (i = 0; i < N; i++) {
+            // F = F + (y(i, 1) >= lmin);
+            G(i * LPnum + 0, i * nv + 0) = -1.0;
+            h(i * LPnum + 0) = -Lmin[i];
+
+            // F = F + (y(i, 1) <= lmax);
+            G(i * LPnum + 1, i * nv + 0) = 1.0;
+            h(i * LPnum + 1) = Lmax[i];
+        }
+
+        p = N * LPnum;
+        if (mode == 2) {
+            /* Relaxed Terminal Constraints */
+            // F = F + (y(N * nx + 1) - dlf <= dl);
+            G(p + 0, (N - 1) * nv + 0) = 1;
+            G(p + 0, N * nv + 0) = -1;
+            h(p + 0) = dlf;
+
+            // F = F + (y(N * nx + 1) - dlf >= -dl);
+            G(p + 1, (N - 1) * nv + 0) = -1;
+            G(p + 1, N * nv + 0) = -1;
+            h(p + 1) = -dlf;
+
+            // F = F + (y(N * nx + 2) - daf <= da);
+            G(p + 2, (N - 1) * nv + 1) = 1;
+            G(p + 2, N * nv + 1) = -1;
+            h(p + 2) = daf;
+
+            // F = F + (y(N * nx + 2) - daf >= -da);
+            G(p + 3, (N - 1) * nv + 1) = -1;
+            G(p + 3, N * nv + 1) = -1;
+            h(p + 3) = -daf;
+
+            p = p + 4;
+        }
+
+        for (i = 0; i < N; i++) {
+            // F = F + (y(i, 3)*y(i, 3) <= y(i, 4));
+            G(p + i * 3 + 0, i * nv + 3) = -1.0 / sqrt(2);
+            G(p + i * 3 + 1, i * nv + 3) = -1.0 / sqrt(2);
+            G(p + i * 3 + 2, i * nv + 2) = -1.0;
+
+            h(p + i * 3 + 0) = 1.0 / (2 * sqrt(2));
+            h(p + i * 3 + 1) = -1.0 / (2 * sqrt(2));
+            h(p + i * 3 + 2) = 0.0;
+        }
+
+        DenseToSparseCCS(G, Gjc, Gir, Gpr);
+
+        /* Objective Function */
+        for (i = 0; i < N; i++)
+            c(i * nv + 3) = 10.0;
+        if (mode == 2) {
+            c(N * nv + 0) = 10;
+            c(N * nv + 1) = 100;
+        }
+
+        /* Conic Cone Structure */
+        for (i = 0; i < N; i++)
+            q[i] = 3;
+
+        /* Preparation for ECOS */
+        dimn = ele;
+        dimm = rowsG;
+        dimp = rowsA;
+        if (mode == 1)
+            diml = N * LPnum;
+        if (mode == 2)
+            diml = N * LPnum + 4;
+        dimq = N;
+
+        ecos_c = c.data();
+        ecos_b = b.data();
+        ecos_h = h.data();
+        ecos_Gpr = Gpr.data();
+        ecos_Gjc = Gjc.data();
+        ecos_Gir = Gir.data();
+        ecos_Apr = Apr.data();
+        ecos_Ajc = Ajc.data();
+        ecos_Air = Air.data();
+        ecos_q = q.data();
+
+        mywork = ECOS_setup(dimn, dimm, dimp, diml, dimq, ecos_q, 0, ecos_Gpr, ecos_Gjc, ecos_Gir, ecos_Apr, ecos_Ajc, ecos_Air, ecos_c, ecos_h, ecos_b);
+
+        /* Solution by ECOS */
+        exitflag = ECOS_solve(mywork);
+        for (i = 0; i < ele; i++)
+            res[i] = mywork->x[i];
+
+        /* CleanUp */
+        ECOS_cleanup(mywork, keepvars);
+
+        /* Compute Difference between Iteration */
+        for (i = 0; i < N; i++) {
+            l[i] = res[i * nv + 0];
+            a[i] = res[i * nv + 1];
+        }
+
+        l_diff = 0.0;
+        a_diff = 0.0;
+        for (i = 0; i < N; i++) {
+            temp = fabs(l[i] - lk[i]);
+            if (temp > l_diff)
+                l_diff = temp;
+
+            temp = fabs(a[i] - ak[i]);
+            if (temp > a_diff)
+                a_diff = temp;
+        }
+        l_diff *= r_scale;
+        a_diff *= 180 / M_PI;
+
+#ifdef VIS_ON
+        printf("Current iterations: %d\n", iter);
+        printf("dl: %.2f m, da: %.2f deg.\n", l_diff, a_diff);
+#endif
+
+        /* Check Convergence */
+        if (iter > max_iter_path_local || (l_diff <= 1E-1 && a_diff <= 1E-1)) {
+            flag = 0;
+        } else {
+            for (i = 0; i < N; i++) {
+                lk[i] = l[i];
+                ak[i] = a[i];
+            }
+            iter = iter + 1;
+        }
+    }
+
+    /* =============== Result =============== */
+    for (i = 0; i < N; i++) {
+        PassLine->L[i] = res[i * nv + 0] * r_scale;
+        PassLine->dA[i] = res[i * nv + 1];
+        PassLine->K[i] = res[i * nv + 2] / (vref * vref) / r_scale;
+        PassLine->A[i] = PassLine->Aref[i] + PassLine->dA[i];
+        PassLine->X[i] = PassLine->Xref[i] + PassLine->L[i] * cos(PassLine->Aref[i] + M_PI / 2);
+        PassLine->Y[i] = PassLine->Yref[i] + PassLine->L[i] * sin(PassLine->Aref[i] + M_PI / 2);
+    }
+
+    PassLine->S[0] = 0.0;
+    for (i = 0; i < N - 1; i++) {
+        dx = PassLine->X[i + 1] - PassLine->X[i];
+        dy = PassLine->Y[i + 1] - PassLine->Y[i];
+        PassLine->S[i + 1] = PassLine->S[i] + sqrt(dx * dx + dy * dy);
+    }
+
+    // PassLine->PathFlag = exitflag;
+    if (exitflag == 0 || exitflag == 10){
+        PassLine->PathFlag = 0;
+        return 0;
+    } 
+    else{
+        PassLine->PathFlag = 1;
+        return 1;
+    }   
+}
+
+/* =============== VelOptLocal.c =============== */
+int OptPlanner::VelOptLocal(const std::shared_ptr<STATE> StateF, int mode) {
+    /* =============== Data Structure =============== */
+    int i, p;
+    int N = PassLine->N, nx = 1, nu = 1, nv = nx + nu;
+    int ele, rowsA, rowsG, LPnum = 11;
+    double Rscale, Gearth, r_scale, v_scale, a_scale;
+    double Vmax, Vmin, vel0, velf, Cw_diff, Cw0_1, Cw2_1, Cw0_2, Cw2_2, Ce0, Ce2;
+    double Cn_diff, Cn0_1, Cn2_1, Cn0_2, Cn2_2, Cn0_3, Cn2_3, Cn0_4, Cn2_4;
+
+    int dimn, dimm, dimp, diml, dimq;
+    double *ecos_c, *ecos_b, *ecos_h, *ecos_Apr, *ecos_Gpr;
+    int *ecos_Ajc, *ecos_Gjc, *ecos_Air, *ecos_Gir;
+
+    pwork *mywork;
+    idxint exitflag = ECOS_FATAL;
+    idxint keepvars = 0;
+
+    if (mode == 1) {
+        ele = N * nv;
+        rowsA = 2 * nx + (N - 1) * nx;
+        rowsG = N * LPnum;
+    } else if (mode == 2) {
+        ele = N * nv + 1;
+        rowsA = nx + (N - 1) * nx;
+        rowsG = N * LPnum + 2;
+    } else {
+        printf("Error Mode!\n");
+        return -1;
+    }
+
+    std::vector<double> ds(N), K(N), res(ele);
+    std::vector<double> Gpr, Apr;
+    std::vector<int> Gjc, Gir, Ajc, Air;
+
+    MatrixXd A = MatrixXd::Zero(rowsA, ele);
+    MatrixXd G = MatrixXd::Zero(rowsG, ele);
+    VectorXd b = VectorXd::Zero(rowsA);
+    VectorXd h = VectorXd::Zero(rowsG);
+    VectorXd c = VectorXd::Zero(ele);
+
+    /* ================ Parameters ================ */
+    /* Physical Parameters */
+    Rscale = 100;
+    Gearth = 9.807;
+
+    /* Scale Variables */
+    r_scale = Rscale;
+    v_scale = sqrt(Rscale * Gearth);
+    a_scale = Gearth;
+
+    /* Initial Conditions */
+    vel0 = StateI->v[0] / v_scale;
+
+    /* Initial Conditions */
+    velf = StateF->v[0] / v_scale;
+
+    /* Physical Parameters of Vehicle */
+    Vmax = _v_max / v_scale;
+    Vmin = 0.0 / v_scale;
+
+    /* Constraints on At */
+    Cw_diff = overtake_coeff_cw;
+    Cw0_1 = ((9.3927378534586872) - Cw_diff) / a_scale;
+    Cw2_1 = (0.0029555400296912) * r_scale;
+    Cw0_2 = ((10.4467932456732253) - Cw_diff) / a_scale;
+    Cw2_2 = (0.0023257377381671) * r_scale;
+
+    if (PassLine->PTP_on == 1) {
+        Ce0 = (18.6636650349874209) / a_scale;
+        Ce2 = (-0.0028073357257396) * r_scale;
+    } else {
+        Ce0 = (16.8777023207990844) / a_scale;
+        Ce2 = (-0.0030493152004459) * r_scale;
+    }
+
+    /* Constraints on An */
+    Cn_diff = overtake_coeff_cn;
+    Cn0_1 = ((10.5556519772897399) - Cn_diff) / a_scale;
+    Cn2_1 = (0.0085685315600145) * r_scale;
+    Cn0_2 = ((12.9434316702354657) - Cn_diff) / a_scale;
+    Cn2_2 = (0.0046548389863174) * r_scale;
+    Cn0_3 = ((15.2934779420126024) - Cn_diff) / a_scale;
+    Cn2_3 = (0.0031910503440862) * r_scale;
+    Cn0_4 = ((17.6827477139429803) - Cn_diff) / a_scale;
+    Cn2_4 = (0.0024269436469385) * r_scale;
+
+    /* ================ Initial Profile ================ */
+    for (i = 0; i < N - 1; i++) {
+        ds[i] = PassLine->S[i + 1] - PassLine->S[i];
+        ds[i] /= r_scale;
+    }
+
+    for (i = 0; i < N; i++) {
+        K[i] = fabs(PassLine->K[i]) * r_scale;
+    }
+
+    /* ================ Optimization ================ */
+    /* Initinal Constraints */
+    // F = F + (y(1) == vel0 * vel0);
+    A(0, 0) = 1;
+    b(0) = vel0 * vel0;
+
+    /* Equality Constraints (Dynamics) */
+    p = nx;
+    for (i = 0; i < N - 1; i++) {
+        A(p + i, i * nv + 0) = 1 - 2 * Vehicle->CD * r_scale / Vehicle->Mass * ds[i];
+        A(p + i, (i + 1) * nv + 0) = -1;
+        A(p + i, i * nv + 1) = 2 * ds[i];
+        b(p + i) = 0;
+    }
+
+    /* Terminal Constraints */
+    if (mode == 1) {
+        p = p + (N - 1) * nx;
+        // F = F + (y(N * nx + 1) == velf * velf);
+        A(p + 0, (N - 1) * nv + 0) = 1;
+        b(p + 0) = velf * velf;
+    }
+
+    DenseToSparseCCS(A, Ajc, Air, Apr);
+
+    /* Inequality Constraints */
+    for (i = 0; i < N; i++) {
+        // F = F + (y(i, 1) >= VELmin*VELmin);
+        G(LPnum * i + 0, i * nv + 0) = -1;
+        h(LPnum * i + 0) = -Vmin * Vmin;
+
+        // F = F + (y(i, 1) <= VELmax*VELmax);
+        G(LPnum * i + 1, i * nv + 0) = 1;
+        h(LPnum * i + 1) = Vmax * Vmax;
+
+        // F = F + (y(i, 2) >= -Cw0 - Cw2 * y(i, 1));
+        G(LPnum * i + 2, i * nv + 0) = -Cw2_1;
+        G(LPnum * i + 2, i * nv + 1) = -1;
+        h(LPnum * i + 2) = Cw0_1;
+
+        // F = F + (y(i, 2) >= -Cw0 - Cw2 * y(i, 1));
+        G(LPnum * i + 3, i * nv + 0) = -Cw2_2;
+        G(LPnum * i + 3, i * nv + 1) = -1;
+        h(LPnum * i + 3) = Cw0_2;
+
+        // F = F + (y(i, 2) <= Cw0 + Cw2 * y(i, 1));
+        G(LPnum * i + 4, i * nv + 0) = -Cw2_1;
+        G(LPnum * i + 4, i * nv + 1) = 1;
+        h(LPnum * i + 4) = Cw0_1;
+
+        // F = F + (y(i, 2) <= Cw0 + Cw2 * y(i, 1));
+        G(LPnum * i + 5, i * nv + 0) = -Cw2_2;
+        G(LPnum * i + 5, i * nv + 1) = 1;
+        h(LPnum * i + 5) = Cw0_2;
+
+        // F = F + (y(i, 2) <= Ce0 + Ce2 * y(i, 1));
+        G(LPnum * i + 6, i * nv + 0) = -Ce2;
+        G(LPnum * i + 6, i * nv + 1) = 1;
+        h(LPnum * i + 6) = Ce0;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 7, i * nv + 0) = K[i] - Cn2_1;
+        h(LPnum * i + 7) = Cn0_1;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 8, i * nv + 0) = K[i] - Cn2_2;
+        h(LPnum * i + 8) = Cn0_2;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 9, i * nv + 0) = K[i] - Cn2_3;
+        h(LPnum * i + 9) = Cn0_3;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1));
+        G(LPnum * i + 10, i * nv + 0) = K[i] - Cn2_4;
+        h(LPnum * i + 10) = Cn0_4;
+    }
+
+    p = N * LPnum;
+    if (mode == 2) {
+        /* Relaxed Terminal Constraints */
+        // F = F + (y(N * nx + 1) - velf * velf <= dv);
+        G(p + 0, (N - 1) * nv + 0) = 1;
+        G(p + 0, N * nv + 0) = -1;
+        h(p + 0) = velf * velf;
+
+        // F = F + (y(N * nx + 1) - velf * velf >= -dv);
+        G(p + 1, (N - 1) * nv + 0) = -1;
+        G(p + 1, N * nv + 0) = -1;
+        h(p + 1) = -velf * velf;
+    }
+
+    DenseToSparseCCS(G, Gjc, Gir, Gpr);
+
+    /* Objective Function */
+    for (i = 0; i < N; i++)
+        c(i * nv + 0) = -1.0;
+    if (mode == 2)
+        c(N * nv + 0) = 100;
+
+    /* Preparation for ECOS */
+    dimn = ele;
+    dimm = rowsG;
+    dimp = rowsA;
+    if (mode == 1)
+        diml = N * LPnum;
+    if (mode == 2)
+        diml = N * LPnum + 2;
+    dimq = 0;
+
+    ecos_c = c.data();
+    ecos_b = b.data();
+    ecos_h = h.data();
+    ecos_Gpr = Gpr.data();
+    ecos_Gjc = Gjc.data();
+    ecos_Gir = Gir.data();
+    ecos_Apr = Apr.data();
+    ecos_Ajc = Ajc.data();
+    ecos_Air = Air.data();
+
+    mywork = ECOS_setup(dimn, dimm, dimp, diml, dimq, NULL, 0, ecos_Gpr, ecos_Gjc, ecos_Gir, ecos_Apr, ecos_Ajc, ecos_Air, ecos_c, ecos_h, ecos_b);
+
+    /* Solution by ECOS */
+    exitflag = ECOS_solve(mywork);
+    for (i = 0; i < ele; i++)
+        res[i] = mywork->x[i];
+
+    /* CleanUp */
+    ECOS_cleanup(mywork, keepvars);
+
+    /* =============== Result =============== */
+    for (i = 0; i < N; i++) {
+        PassLine->V[i] = sqrt(abs(res[i * nv + 0])) * v_scale;
+        PassLine->AN[i] = PassLine->K[i] * PassLine->V[i] * PassLine->V[i];
+        PassLine->AT[i] = res[i * nv + 1] * a_scale;
+    }
+    PassLine->AT[N - 1] = PassLine->AT[N - 2];
+
+    PassLine->VelFlag = exitflag;
+
+    if (exitflag == 0 || exitflag == 10)
+        return 0;
+    else
+        return 1;
+}
+
+/* =============== VelOptLocalR.c =============== */
+int OptPlanner::VelOptLocalR(const std::shared_ptr<STATE> StateF, int mode) {
+    /* =============== Data Structure =============== */
+    int i, p;
+    int N = PassLine->N, nx = 1, nu = 2, nv = nx + nu;
+    int ele, rowsA, rowsG, LPnum = 12;
+    double Rscale, Gearth, r_scale, v_scale, a_scale, errmax;
+    double Vmax, Vmin, vel0, velf, Cw_diff, Cw0_1, Cw2_1, Cw0_2, Cw2_2, Ce0, Ce2, Ce_diff;
+    double Cn_diff, Cn0_1, Cn2_1, Cn0_2, Cn2_2, Cn0_3, Cn2_3, Cn0_4, Cn2_4;
+
+    int dimn, dimm, dimp, diml, dimq;
+    double *ecos_c, *ecos_b, *ecos_h, *ecos_Apr, *ecos_Gpr;
+    int *ecos_Ajc, *ecos_Gjc, *ecos_Air, *ecos_Gir;
+
+    pwork *mywork;
+    idxint exitflag = ECOS_FATAL;
+    idxint keepvars = 0;
+
+    if (mode == 1) {
+        ele = N * nv;
+        rowsA = 2 * nx + (N - 1) * nx;
+        rowsG = N * LPnum;
+    } else if (mode == 2) {
+        ele = N * nv + 1;
+        rowsA = nx + (N - 1) * nx;
+        rowsG = N * LPnum + 2;
+    } else {
+        printf("Error Mode!\n");
+        return -1;
+    }
+
+    std::vector<double> ds(N), K(N), res(ele), err(N);
+    std::vector<double> Gpr, Apr;
+    std::vector<int> Gjc, Gir, Ajc, Air;
+
+    MatrixXd A = MatrixXd::Zero(rowsA, ele);
+    MatrixXd G = MatrixXd::Zero(rowsG, ele);
+    VectorXd b = VectorXd::Zero(rowsA);
+    VectorXd h = VectorXd::Zero(rowsG);
+    VectorXd c = VectorXd::Zero(ele);
+
+    /* ================ Parameters ================ */
+    /* Physical Parameters */
+    Rscale = 100;
+    Gearth = 9.807;
+
+    /* Scale Variables */
+    r_scale = Rscale;
+    v_scale = sqrt(Rscale * Gearth);
+    a_scale = Gearth;
+
+    /* Initial Conditions */
+    vel0 = StateI->v[0] / v_scale;
+
+    /* Initial Conditions */
+    velf = StateF->v[0] / v_scale;
+
+    /* Physical Parameters of Vehicle */
+    Vmax = _v_max / v_scale;
+    Vmin = 0.0 / v_scale;
+
+    /* ================ change GGV ================ */
+    // ----------何威版本--------------------
+    // Cw_diff = 3.0;   // 1.5  老版本
+    // Cw0_1 = ((13.1106898042984863)-Cw_diff)/a_scale;
+    // Cw2_1 = (0.0033777610151458)*r_scale;
+    // Cw0_2 = ((10.9124507370689585)-Cw_diff)/a_scale;
+    // Cw2_2 = (0.0047844720852997)*r_scale;
+
+    // Cw_diff = 3.0;  // 何威制动力的函数
+    // Cw0_1 = ((12.0626388420629684)-Cw_diff)/a_scale;
+    // Cw2_1 = (0.0069721099327322)*r_scale;
+    // Cw0_2 = ((11.6572623436656428)-Cw_diff)/a_scale;
+    // Cw2_2 = (0.0072188176850739)*r_scale;
+
+
+    // Ce_diff = 2.0 ;
+    // if (PassLine->PTP_on == 1) {
+    //     // Ce0 = (18.6360586780909792-Ce_diff)/a_scale;
+    //     // Ce2 = (-0.0027894637705529)*r_scale;
+    //     Ce0 = (17.8681903970895561-Ce_diff)/a_scale;
+    //     Ce2 = (-0.0020462452857978)*r_scale;
+    // } else {
+    //     // Ce0 = (19.1439694353973309-Ce_diff)/a_scale;
+    //     // Ce2 = (-0.0031415431220919)*r_scale;
+    //     Ce0 = (18.7602893968255451-Ce_diff)/a_scale;
+    //     Ce2 = (-0.0024583381358119)*r_scale;
+    // }
+
+    // Cn_diff = 0.0;
+    // // if ((StateI->s[0] >= 100 && StateI->s[0] <= 450))
+    // // {
+    // //     Cn_diff = 2.0;  //可以不加，但是如果要加的话就得大于1
+    // // }
+    // if ((StateI->s[0] >= 1335 && StateI->s[0] <= 1500))  //1100 - 1500
+    // {
+    //     Cn_diff = 4.0;  
+    // }
+    // if ((StateI->s[0] >= 2500 && StateI->s[0] <= 2900))
+    // {
+    //     Cn_diff = 1.2;  
+    // }
+    // if ((StateI->s[0] >= 3900 && StateI->s[0] <= 4400))  
+    // {
+    //     Cn_diff = 1.0;
+    // }
+    // if ((StateI->s[0] >= 4400 && StateI->s[0] <= 4570)) 
+    // {
+    //     Cn_diff = 6.0;  // 4400影响比较大，就别放大了
+    // }
+    // if ((StateI->s[0] >= 4800 && StateI->s[0] <= 5000))
+    // {
+    //     Cn_diff = 2.0;  //这个弯道看看能不能下探  2ok 1不行
+    // }
+    // if ((StateI->s[0] >= 5000 && StateI->s[0] <= 5070))
+    // {
+    //     Cn_diff = 6.0;  //这个弯道看看能不能下探  7-6
+    // }
+    // Cn0_1 = ((12.4246483302850361)-Cn_diff)/a_scale;
+    // Cn2_1 = (0.0046523864153043)*r_scale;
+    // Cn0_2 = ((13.1983069462352169)-Cn_diff)/a_scale;
+    // Cn2_2 = (0.0034409047216489)*r_scale;
+    // Cn0_3 = ((13.9602858149589437)-Cn_diff)/a_scale;
+    // Cn2_3 = (0.0029877891317006)*r_scale;
+    // Cn0_4 = ((14.7705237855376765)-Cn_diff)/a_scale;
+    // Cn2_4 = (0.0027508128510164)*r_scale;
+
+    // //---------------原始版本和马哥版本--------------
+    /* Constraints on At */  
+    Cw_diff = overtake_coeff_cw;
+    Cw_diff = 3.0;
+    Cw0_1 = ((9.3927378534586872) - Cw_diff) / a_scale;
+    Cw2_1 = (0.0029555400296912) * r_scale;
+    Cw0_2 = ((10.4467932456732253) - Cw_diff) / a_scale;
+    Cw2_2 = (0.0023257377381671) * r_scale;
+
+    if (PassLine->PTP_on == 1) {
+        Ce0 = (18.6636650349874209) / a_scale;
+        Ce2 = (-0.0028073357257396) * r_scale;
+    } else {
+        Ce0 = (16.8777023207990844) / a_scale;
+        Ce2 = (-0.0030493152004459) * r_scale;
+    }
+
+    // // /* Constraints on An */
+    // // Cn_diff = overtake_coeff_cn;
+    // // Cn0_1 = ((10.5556519772897399) - Cn_diff) / a_scale;
+    // // Cn2_1 = (0.0085685315600145) * r_scale;
+    // // Cn0_2 = ((12.9434316702354657) - Cn_diff) / a_scale;
+    // // Cn2_2 = (0.0046548389863174) * r_scale;
+    // // Cn0_3 = ((15.2934779420126024) - Cn_diff) / a_scale;
+    // // Cn2_3 = (0.0031910503440862) * r_scale;
+    // // Cn0_4 = ((17.6827477139429803) - Cn_diff) / a_scale;
+    // // Cn2_4 = (0.0024269436469385) * r_scale;
+
+    // /* Constraints on At */
+    // Cw_diff = overtake_coeff_cw;
+    // Cw_diff = 15.0;
+    // // if ((StateI->s[0] >= 100 && StateI->s[0] <= 400))
+    // // {
+    // //     Cw_diff = 11.0;
+    // // }
+    // // if ((StateI->s[0] >= 2300 && StateI->s[0] <= 2800) ||
+    // //     (StateI->s[0] >= 3900 && StateI->s[0] <= 4600))
+    // // {
+    // //     Cw_diff = 11.0;
+    // // }
+    // Cw0_1 = ((19.6242208845234636)-Cw_diff)/a_scale;
+    // Cw2_1 = (0.0028842683257680)*r_scale;
+    // Cw0_2 = ((19.9830008059323099)-Cw_diff)/a_scale;
+    // Cw2_2 = (0.0026414130659309)*r_scale;
+
+    // Ce_diff = -0.5 ;
+    // if (PassLine->PTP_on == 1) {
+    //     Ce0 = (24.1528001178967422-Ce_diff)/a_scale;
+    //     Ce2 = (-0.0048603820104509)*r_scale;
+    // } else {
+    //     Ce0 = (24.3829171463861876-Ce_diff)/a_scale;
+    //     Ce2 = (-0.0058775844041055)*r_scale;
+    // }
+
+    // /* Constraints on An ma*/
+    Cn_diff = overtake_coeff_cn;
+    Cn_diff = 4.0;
+
+    // if ((StateI->s[0] >= 4130 && StateI->s[0] <= 4280))  //1100 - 1500
+    // {
+    //     Cn_diff += 5.0;  // 4.0
+    // }
+    // if ((StateI->s[0] >= 3300 && StateI->s[0] <= 3600))  //1100 - 1500
+    // {
+    //     Cn_diff += 6.0;  //8.0
+    // }
+
+
+    // if ((StateI->s[0] >= 380 && StateI->s[0] <= 500))
+    // {
+    //     Cn_diff = 0.0;  //可以不加，但是如果要加的话就得大于1
+    // }
+
+    // if ((StateI->s[0] >= 1100 && StateI->s[0] <= 1335))  //1100 - 1500
+    // {
+    //     Cn_diff += 2.0;  // 4.0
+    // }
+    // if ((StateI->s[0] >= 1335 && StateI->s[0] <= 1500))  //1100 - 1500
+    // {
+    //     Cn_diff += 2.0;  //8.0
+    // }
+
+
+
+    // if ((StateI->s[0] >= 1500 && StateI->s[0] <= 2000))  
+    // {
+    //     Cn_diff -= 0.0;  
+    // }
+
+    // if ((StateI->s[0] >= 2450 && StateI->s[0] <= 2560))
+    // {
+    //     Cn_diff = 0.0;  
+    // }
+    // if ((StateI->s[0] >= 2560 && StateI->s[0] <= 2900))
+    // {
+    //     Cn_diff = 0.0;    //5.0
+    // }
+    //  0620 增加
+    // if ((StateI->s[0] >= 3900 && StateI->s[0] <= 4400))  
+    // {
+    //     Cn_diff += 2.0;   // 7.5
+    // }
+    // if ((StateI->s[0] >= 4400 && StateI->s[0] <= 4570)) 
+    // {
+    //     Cn_diff += 2.0;  // 4400影响比较大，就别放大了 //4.0
+    // }
+
+    // if ((StateI->s[0] >= 4570 && StateI->s[0] <= 4800))   // 14-15直道
+    // {
+    //     Cn_diff += 2.0;  // 4400影响比较大，就别放大了 //2.0
+    // }
+
+    // if ((StateI->s[0] >= 4800 && StateI->s[0] <= 5000))
+    // {
+    //     Cn_diff += 2.0;  //这个弯道看看能不能下探  2ok 1不行  //3.0
+    // }
+    // if ((StateI->s[0] >= 5000 && StateI->s[0] <= 5070))
+    // {
+    //     Cn_diff += 2.0;  //这个弯道看看能不能下探  7-6   // 6.0
+    // }
+
+    Cn0_1 = ((10.5556519772897399) - Cn_diff) / a_scale;
+    Cn2_1 = (0.0085685315600145) * r_scale;
+    Cn0_2 = ((12.9434316702354657) - Cn_diff) / a_scale;
+    Cn2_2 = (0.0046548389863174) * r_scale;
+    Cn0_3 = ((15.2934779420126024) - Cn_diff) / a_scale;
+    Cn2_3 = (0.0031910503440862) * r_scale;
+    Cn0_4 = ((17.6827477139429803) - Cn_diff) / a_scale;
+    Cn2_4 = (0.0024269436469385) * r_scale;
+
+    // Cn0_1 = ((18.7303098422518843)-Cn_diff)/a_scale;
+    // Cn2_1 = (0.0023961556040884)*r_scale;
+    // Cn0_2 = ((18.8863028383936395)-Cn_diff)/a_scale;
+    // Cn2_2 = (0.0022418929821787)*r_scale;
+    // Cn0_3 = ((19.3637676776494985)-Cn_diff)/a_scale;
+    // Cn2_3 = (0.0019847220637169)*r_scale;
+    // Cn0_4 = ((20.5804627043672248)-Cn_diff)/a_scale;
+    // Cn2_4 = (0.0016220207460112)*r_scale;
+
+    // Cn0_1 = ((12.4246483302850361)-Cn_diff)/a_scale;
+    // Cn2_1 = (0.0046523864153043)*r_scale;
+    // Cn0_2 = ((13.1983069462352169)-Cn_diff)/a_scale;
+    // Cn2_2 = (0.0034409047216489)*r_scale;
+    // Cn0_3 = ((13.9602858149589437)-Cn_diff)/a_scale;
+    // Cn2_3 = (0.0029877891317006)*r_scale;
+    // Cn0_4 = ((14.7705237855376765)-Cn_diff)/a_scale;
+    // Cn2_4 = (0.0027508128510164)*r_scale;
+
+    
+
+
+    /* ================ Initial Profile ================ */
+    for (i = 0; i < N - 1; i++) {
+        ds[i] = PassLine->S[i + 1] - PassLine->S[i];
+        ds[i] /= r_scale;
+    }
+
+    for (i = 0; i < N; i++) {
+        K[i] = fabs(PassLine->K[i]) * r_scale;
+    }
+
+    /* ================ Optimization ================ */
+    /* Initinal Constraints */
+    // F = F + (y(1) == vel0 * vel0);
+    A(0, 0) = 1;
+    b(0) = vel0 * vel0;
+
+    /* Equality Constraints (Dynamics) */
+    p = nx;
+    for (i = 0; i < N - 1; i++) {
+        A(p + i, i * nv + 0) = 1 - 2 * Vehicle->CD * r_scale / Vehicle->Mass * ds[i];
+        A(p + i, (i + 1) * nv + 0) = -1;
+        A(p + i, i * nv + 1) = 2 * ds[i];
+        b(p + i) = 0;
+    }
+
+    /* Terminal Constraints */
+    if (mode == 1) {
+        p = p + (N - 1) * nx;
+        // F = F + (y(N * nx + 1) == velf * velf);
+        A(p + 0, (N - 1) * nv + 0) = 1;
+        b(p + 0) = velf * velf;
+    }
+
+    DenseToSparseCCS(A, Ajc, Air, Apr);
+
+    /* Inequality Constraints */
+    for (i = 0; i < N; i++) {
+        // F = F + (y(i, 1) >= VELmin*VELmin);
+        G(LPnum * i + 0, i * nv + 0) = -1;
+        h(LPnum * i + 0) = -Vmin * Vmin;
+
+        // F = F + (y(i, 1) <= VELmax*VELmax);
+        G(LPnum * i + 1, i * nv + 0) = 1;
+        h(LPnum * i + 1) = Vmax * Vmax;
+
+        // F = F + (y(i, 2) >= -Cw0 - Cw2 * y(i, 1));
+        G(LPnum * i + 2, i * nv + 0) = -Cw2_1;
+        G(LPnum * i + 2, i * nv + 1) = -1;
+        h(LPnum * i + 2) = Cw0_1;
+
+        // F = F + (y(i, 2) >= -Cw0 - Cw2 * y(i, 1));
+        G(LPnum * i + 3, i * nv + 0) = -Cw2_2;
+        G(LPnum * i + 3, i * nv + 1) = -1;
+        h(LPnum * i + 3) = Cw0_2;
+
+        // F = F + (y(i, 2) <= Cw0 + Cw2 * y(i, 1));
+        G(LPnum * i + 4, i * nv + 0) = -Cw2_1;
+        G(LPnum * i + 4, i * nv + 1) = 1;
+        h(LPnum * i + 4) = Cw0_1;
+
+        // F = F + (y(i, 2) <= Cw0 + Cw2 * y(i, 1));
+        G(LPnum * i + 5, i * nv + 0) = -Cw2_2;
+        G(LPnum * i + 5, i * nv + 1) = 1;
+        h(LPnum * i + 5) = Cw0_2;
+
+        // F = F + (y(i, 2) <= Ce0 + Ce2 * y(i, 1));
+        G(LPnum * i + 6, i * nv + 0) = -Ce2;
+        G(LPnum * i + 6, i * nv + 1) = 1;
+        h(LPnum * i + 6) = Ce0;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1) + y(i, 3));
+        G(LPnum * i + 7, i * nv + 0) = K[i] - Cn2_1;
+        G(LPnum * i + 7, i * nv + 2) = -1;
+        h(LPnum * i + 7) = Cn0_1;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1) + y(i, 3));
+        G(LPnum * i + 8, i * nv + 0) = K[i] - Cn2_2;
+        G(LPnum * i + 8, i * nv + 2) = -1;
+        h(LPnum * i + 8) = Cn0_2;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1) + y(i, 3));
+        G(LPnum * i + 9, i * nv + 0) = K[i] - Cn2_3;
+        G(LPnum * i + 9, i * nv + 2) = -1;
+        h(LPnum * i + 9) = Cn0_3;
+
+        // F = F + (k(i) * y(i, 1) <= Cn0 + Cn2 * y(i, 1) + y(i, 3));
+        G(LPnum * i + 10, i * nv + 0) = K[i] - Cn2_4;
+        G(LPnum * i + 10, i * nv + 2) = -1;
+        h(LPnum * i + 10) = Cn0_4;
+
+        // F = F + (y(i, 3) >= 0);
+        G(LPnum * i + 11, i * nv + 2) = -1;
+        h(LPnum * i + 11) = 0;
+    }
+
+    p = N * LPnum;
+    if (mode == 2) {
+        /* Relaxed Terminal Constraints */
+        // F = F + (y(N * nx + 1) - velf * velf <= dv);
+        G(p + 0, (N - 1) * nv + 0) = 1;
+        G(p + 0, N * nv + 0) = -1;
+        h(p + 0) = velf * velf;
+
+        // F = F + (y(N * nx + 1) - velf * velf >= -dv);
+        G(p + 1, (N - 1) * nv + 0) = -1;
+        G(p + 1, N * nv + 0) = -1;
+        h(p + 1) = -velf * velf;
+    }
+
+    DenseToSparseCCS(G, Gjc, Gir, Gpr);
+
+    /* Objective Function */
+    for (i = 0; i < N; i++) {
+        c(i * nv + 0) = -1.0;
+        c(i * nv + 2) = 100.0;
+    }
+    if (mode == 2)
+        c(N * nv + 0) = 100.0;
+
+    /* Preparation for ECOS */
+    dimn = ele;
+    dimm = rowsG;
+    dimp = rowsA;
+    if (mode == 1)
+        diml = N * LPnum;
+    if (mode == 2)
+        diml = N * LPnum + 2;
+    dimq = 0;
+
+    ecos_c = c.data();
+    ecos_b = b.data();
+    ecos_h = h.data();
+    ecos_Gpr = Gpr.data();
+    ecos_Gjc = Gjc.data();
+    ecos_Gir = Gir.data();
+    ecos_Apr = Apr.data();
+    ecos_Ajc = Ajc.data();
+    ecos_Air = Air.data();
+
+    mywork = ECOS_setup(dimn, dimm, dimp, diml, dimq, NULL, 0, ecos_Gpr, ecos_Gjc, ecos_Gir, ecos_Apr, ecos_Ajc, ecos_Air, ecos_c, ecos_h, ecos_b);
+
+    /* Solution by ECOS */
+    exitflag = ECOS_solve(mywork);
+    for (i = 0; i < ele; i++)
+        res[i] = mywork->x[i];
+
+    /* CleanUp */
+    ECOS_cleanup(mywork, keepvars);
+
+    /* =============== Result =============== */
+    for (i = 0; i < N; i++) {
+        PassLine->V[i] = sqrt(abs(res[i * nv + 0])) * v_scale;
+        PassLine->AN[i] = PassLine->K[i] * PassLine->V[i] * PassLine->V[i];
+        PassLine->AT[i] = res[i * nv + 1] * a_scale;
+        err[i] = res[i * nv + 2] * a_scale;
+    }
+    PassLine->AT[N - 1] = PassLine->AT[N - 2];
+    
+
+    errmax = err[0];
+    for (i = 1; i < N; i++) {
+        if (err[i] > errmax) errmax = err[i];
+    }
+
+    // /*20250612修改开始*/
+    // PassLine->TIME[0] = 0.0 ;
+    // for (i = 0; i < N - 1; i++) {
+    //     PassLine->TIME[i + 1] = PassLine->TIME[i] + 2 * ds[i] * r_scale / (PassLine->V[i + 1] + PassLine->V[i]);
+    // }
+    // /*20250612修改结束*/
+
+    // PassLine->VelFlag = exitflag;
+    if ((errmax < 10) && (exitflag == 0 || exitflag == 10)){
+        PassLine->VelFlag = 0;
+        return 0;
+    }  
+    else{
+        PassLine->VelFlag = 1;
+        return 1;
+    }
+}
+
+/* =============== VelOptForwardBackward.c =============== */
+/*
+ * Forward-Backward 速度规划器 —— 从 VpForwardBackward.py 方法论移植
+ *
+ * 核心物理逻辑：
+ *   1. 速度上限 V_limit：v^2 * |K| = a_{y,max}(v)，迭代求解
+ *   2. 前向积分：GGV 椭圆耦合 (p=2)，考虑风阻
+ *   3. 后向积分：最大制动 + 风阻辅助制动
+ *   4. 合并取 min(V_forward, V_backward, V_limit)
+ *
+ * 因地制宜使用 C++ 已有数据结构：
+ *   - PassLine->S/K 作为路径与曲率
+ *   - Vehicle->An/Aw/Ae0/Ae1/Mass/CD 作为车辆参数
+ *   - Interp1 查表
+ */
+int OptPlanner::VelOptForwardBackward(const std::shared_ptr<STATE> StateF, int mode) {
+    int N = PassLine->N;
+    if (N <= 0 || PassLine->K.empty()) {
+        printf("VelOptFB: invalid input (N=%d, K.empty=%d), abort.\n", N, (int)PassLine->K.empty());
+        PassLine->VelFlag = 1;  // 1 表示求解失败
+        return -1;
+    }
+    if (N < 2) {
+        printf("VelOptFB: PassLine->N < 2, abort.\n");
+        PassLine->VelFlag = 1;
+        return -1;
+    }
+
+    /* ========== 参数 (纯 SI 单位，不使用任何 r_scale/v_scale/a_scale) ========== */
+    // double drag_coeff = Vehicle->CD;  // 风阻系数 Drag = CD * v^2
+    double drag_coeff = 0.4;  // 风阻系数 Drag = CD * v^2
+    double mass = Vehicle->Mass;
+    double v_max = _v_max;            // m/s (e.g. 75)
+    double v_min = 0.1;               // m/s 最低速度保护
+
+    /* ========== 初始速度安全校验 ========== */
+    double v0_init = v_min;
+    if (!PassLine->Vs.empty())
+    {
+        v0_init = PassLine->Vs[0];
+    }
+    if (std::isnan(v0_init) || std::isinf(v0_init) || v0_init < 0.0)
+    {
+        v0_init = v_min;
+    }
+    if (v0_init < v_min)
+        v0_init = v_min;
+    if (v0_init > v_max)
+        v0_init = v_max;
+
+    // printf("VelOptFB: N=%d, v0=%.2f m/s, mode=%d, PTP=%d\n", N, v0_init, mode, PassLine->PTP_on);
+
+    /* ========== 步长和曲率 (SI: m, rad/m) ========== */
+    std::vector<double> ds(N - 1);
+    std::vector<double> kappa(N);
+    for (int i = 0; i < N - 1; i++) {
+        ds[i] = PassLine->S[i + 1] - PassLine->S[i];
+        if (ds[i] < 1e-6) ds[i] = 1e-6;  // 防止零步长
+    }
+    for (int i = 0; i < N; i++) {
+        kappa[i] = fabs(PassLine->K[i]);
+    }
+
+    /* ========== 第一步：速度上限 V_limit（基于侧向加速度极限） ========== */
+    /*
+     * 物理约束：|K| * v^2 <= a_{y,max}(v)
+     * 定点迭代求解：v_new = sqrt(a_{y,max}(v_old) / |K|)
+     * 当 K ≈ 0（直道）时，V_limit = v_max
+     */
+    std::vector<double> V_limit(N);
+    for (int i = 0; i < N; i++) {
+        if (kappa[i] < 1e-8) {
+            V_limit[i] = v_max;
+        } else {
+            double v_iter = v_max;
+            for (int iter = 0; iter < 20; iter++) {
+                double vt = std::max(v_min, std::min(v_iter, v_max));
+                double ay_max = Interp1(Vehicle->V, Vehicle->An, Vehicle->N, vt);
+                if (ay_max < 1e-3) ay_max = 1e-3;  // 安全下限
+                double v_new_sq = ay_max / kappa[i];
+                double v_new = std::sqrt(std::max(0.0, v_new_sq));
+                v_new = std::min(v_new, v_max);
+                if (fabs(v_new - v_iter) < 0.01) break;
+                v_iter = v_new;
+            }
+            V_limit[i] = std::max(v_min, std::min(v_iter, v_max));
+        }
+    }
+
+    /* ========== 第二步：前向积分 ========== */
+    std::vector<double> V_forward(N);
+    V_forward[0] = std::min(v0_init, V_limit[0]);
+    V_forward[0] = std::max(v_min, V_forward[0]);
+
+    for (int i = 0; i < N - 1; i++) {
+        double v_cur = V_forward[i];
+        double vt = std::max(v_min, std::min(v_cur, v_max));
+
+        // 查表获取当前速度下的极限加速度
+        double ay_max = 1.0 * Interp1(Vehicle->V, Vehicle->An, Vehicle->N, vt);
+        if (ay_max < 1e-3) ay_max = 1e-3;
+        double ax_max_tyre = 0.6 * Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, vt);
+        double ax_max_engine;
+        if (PassLine->PTP_on == 1) {
+            ax_max_engine = 0.15 * Interp1(Vehicle->V, Vehicle->Ae1, Vehicle->N, vt);
+        } else {
+            ax_max_engine =  0.15 * Interp1(Vehicle->V, Vehicle->Ae0, Vehicle->N, vt);
+        }
+        double ax_max_drive = std::min(ax_max_tyre, ax_max_engine);
+        if (ax_max_drive < 0.0) ax_max_drive = 0.0;
+
+        // 当前侧向加速度
+        double a_y = kappa[i] * v_cur * v_cur;
+
+        // GGV 超椭圆约束（前向）
+        double ax_avail = 0.0;
+        double ratio_ay = std::min(a_y / ay_max, 1.0);
+        double factor = std::pow(std::max(0.0, 1.0 - std::pow(ratio_ay, ggv_exp)), 1.0 / ggv_exp);
+        // ax_avail = ax_max_drive * factor;
+        ax_avail = ax_max_tyre * factor;
+
+        // 减去风阻
+        // double drag_decel = drag_coeff * v_cur * v_cur / mass;
+        double drag_decel;
+        if (v_cur < 12.0)
+        {
+            drag_decel = -640.4 / mass;
+        }
+        else if (v_cur > 65.0)
+        {
+            drag_decel = -3089.0 / mass;
+        }
+        else
+        {
+            drag_decel = -(0.6000 * v_cur * v_cur + 0.0028 * v_cur + 553.9621) / mass;
+        }
+        double ax_net = ax_avail + drag_decel;
+
+        // 运动学积分：v_{i+1}^2 = v_i^2 + 2*ds*a
+        double v_sq_next = v_cur * v_cur + 2.0 * ds[i] * ax_net;
+        v_sq_next = std::max(v_sq_next, v_min * v_min);  // 根号安全保护
+        double v_next = std::sqrt(v_sq_next);
+
+        v_next = std::min(v_next, V_limit[i + 1]);
+        v_next = std::min(v_next, v_max);
+        v_next = std::max(v_next, v_min);
+
+        V_forward[i + 1] = v_next;
+    }
+
+    /* ========== 第三步：后向积分 ========== */
+    std::vector<double> V_backward(N);
+
+    // 终点速度
+    if (mode == 1) {
+        V_backward[N - 1] = std::min(StateF->v[0], V_limit[N - 1]);
+    } else {
+        V_backward[N - 1] = std::min(V_forward[N - 1], V_limit[N - 1]);
+    }
+    V_backward[N - 1] = std::max(v_min, std::min(V_backward[N - 1], v_max));
+
+    for (int i = N - 2; i >= 0; i--) {
+        double v_next = V_backward[i + 1];
+        double vt = std::max(v_min, std::min(v_next, v_max));
+
+        double ay_max = Interp1(Vehicle->V, Vehicle->An, Vehicle->N, vt);
+        if (ay_max < 1e-3) ay_max = 1e-3;
+        double ax_max_brake = Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, vt);
+
+        // 后向积分用 i+1 点的曲率和速度评估侧向加速度
+        double a_y = kappa[i + 1] * v_next * v_next;
+
+        // GGV 超椭圆约束（后向）
+        double ratio_ay = std::min(a_y / ay_max, 1.0);
+        double factor = std::pow(std::max(0.0, 1.0 - std::pow(ratio_ay, ggv_exp)), 1.0 / ggv_exp);
+        double ax_avail_brake = ax_max_brake * factor;
+
+        // 风阻辅助制动
+        // double drag_assist = drag_coeff * v_next * v_next / mass;
+        double drag_assist;
+        if (v_next < 12.0)
+        {
+            drag_assist = -640.4 / mass;
+        }
+        else if (v_next > 65.0)
+        {
+            drag_assist = -3089.0 / mass;
+        }
+        else
+        {
+            drag_assist = -(0.6000 * v_next * v_next + 0.0028 * v_next + 553.9621) / mass;
+        }
+        double ax_brake_total = ax_avail_brake - drag_assist;
+
+        // 后向运动学：v_i^2 = v_{i+1}^2 + 2*ds*a_brake_total
+        double v_sq_prev = v_next * v_next + 2.0 * ds[i] * ax_brake_total;
+        v_sq_prev = std::max(v_sq_prev, v_min * v_min);  // 根号安全保护
+        double v_prev = std::sqrt(v_sq_prev);
+
+        v_prev = std::min(v_prev, V_limit[i]);
+        v_prev = std::min(v_prev, v_max);
+        v_prev = std::max(v_prev, v_min);
+
+        V_backward[i] = v_prev;
+    }
+
+    /* ========== 第四步：合并 —— 取三者最小值 ========== */
+    for (int i = 0; i < N; i++) {
+        PassLine->V[i] = std::min({V_forward[i], V_backward[i], V_limit[i]});
+        PassLine->V[i] = std::max(v_min, PassLine->V[i]);
+
+        // NaN/Inf 安全检测
+        if (std::isnan(PassLine->V[i]) || std::isinf(PassLine->V[i])) {
+            printf("VelOptFB ERROR: V[%d] is NaN/Inf, abort.\n", i);
+            PassLine->VelFlag = 1;
+            return -1;
+        }
+    }
+
+    /* ========== 第五步：计算加速度并存入 PassLine ========== */
+    for (int i = 0; i < N - 1; i++) {
+        double v_cur = PassLine->V[i];
+        double v_nxt = PassLine->V[i + 1];
+
+        PassLine->AT[i] = (v_nxt * v_nxt - v_cur * v_cur) / (2.0 * ds[i]);
+        PassLine->AN[i] = PassLine->K[i] * v_cur * v_cur;
+    }
+    PassLine->AT[N - 1] = PassLine->AT[N - 2];
+    PassLine->AN[N - 1] = PassLine->K[N - 1] * PassLine->V[N - 1] * PassLine->V[N - 1];
+
+    PassLine->VelFlag = 0;
+    // printf("VelOptFB: success, N=%d, V[0]=%.2f, V[N/2]=%.2f, V[N-1]=%.2f\n",
+    //        N, PassLine->V[0], PassLine->V[N / 2], PassLine->V[N - 1]);
+
+    return 0;
+}
+
+void OptPlanner::readFiles(int lenBaseline, const std::string BaseLineFilename, int lenCarData, const std::string CarDataFilename,
+               int lenRaceline, const std::string RaceLineFilename, int lenRacelineLeft, const std::string RaceLineLeftFilename, int lenRacelineRight, const std::string RaceLineRightFilename,
+               int lenSouthRaceline, const std::string SouthRaceLineFilename, int lenSouthRacelineLeft, const std::string SouthRaceLineLeftFilename, int lenSouthRacelineRight, const std::string SouthRaceLineRightFilename,
+               int lenPitline1, const std::string PitLine1Filename, int lenPitline2, const std::string PitLine2Filename) {
+    int flag;
+
+    /* ==================== Read CarData ==================== */
+    Vehicle->N = lenCarData;
+    Vehicle->V = std::vector<double>(Vehicle->N);
+    Vehicle->An = std::vector<double>(Vehicle->N);
+    Vehicle->Aw = std::vector<double>(Vehicle->N);
+    Vehicle->Ae0 = std::vector<double>(Vehicle->N);
+    Vehicle->Ae1 = std::vector<double>(Vehicle->N);
+    Vehicle->Mass = 694;
+    Vehicle->CD = 0.4 ;  //0.4
+    // 最大速度是75  在后面定义了
+
+    BaseLine->N = lenBaseline;
+    BaseLine->Sref = std::vector<double>(BaseLine->N);
+    BaseLine->Xref = std::vector<double>(BaseLine->N);
+    BaseLine->Yref = std::vector<double>(BaseLine->N);
+    BaseLine->Aref = std::vector<double>(BaseLine->N);
+    BaseLine->Kref = std::vector<double>(BaseLine->N);
+    BaseLine->Lmax = std::vector<double>(BaseLine->N);
+    BaseLine->Lmin = std::vector<double>(BaseLine->N);
+
+    PitBaseLine->N = lenPitline1;
+    PitBaseLine->Sref = std::vector<double>(PitBaseLine->N);
+    PitBaseLine->Xref = std::vector<double>(PitBaseLine->N);
+    PitBaseLine->Yref = std::vector<double>(PitBaseLine->N);
+    PitBaseLine->Aref = std::vector<double>(PitBaseLine->N);
+    PitBaseLine->Kref = std::vector<double>(PitBaseLine->N);
+    PitBaseLine->Lmax = std::vector<double>(PitBaseLine->N);
+    PitBaseLine->Lmin = std::vector<double>(PitBaseLine->N);
+
+    RaceLine->N = lenRaceline;
+    RaceLine->Dsafe = 1.51;
+    RaceLine->PTP_on = 0;
+    RaceLine->Sref = std::vector<double>(RaceLine->N);
+    RaceLine->Xref = std::vector<double>(RaceLine->N);
+    RaceLine->Yref = std::vector<double>(RaceLine->N);
+    RaceLine->Aref = std::vector<double>(RaceLine->N);
+    RaceLine->Kref = std::vector<double>(RaceLine->N);
+    RaceLine->Lmax = std::vector<double>(RaceLine->N);
+    RaceLine->Lmin = std::vector<double>(RaceLine->N);
+    RaceLine->S = std::vector<double>(RaceLine->N);
+    RaceLine->L = std::vector<double>(RaceLine->N);
+    RaceLine->X = std::vector<double>(RaceLine->N);
+    RaceLine->Y = std::vector<double>(RaceLine->N);
+    RaceLine->A = std::vector<double>(RaceLine->N);
+    RaceLine->dA = std::vector<double>(RaceLine->N);
+    RaceLine->K = std::vector<double>(RaceLine->N);
+    RaceLine->V = std::vector<double>(RaceLine->N);
+    RaceLine->AN = std::vector<double>(RaceLine->N);
+    RaceLine->AT = std::vector<double>(RaceLine->N);
+    RaceLine->Vs = std::vector<double>(RaceLine->N);
+    RaceLine->ANs = std::vector<double>(RaceLine->N);
+    RaceLine->ATs = std::vector<double>(RaceLine->N);
+    RaceLine->TIME = std::vector<double>(RaceLine->N);
+
+    RaceLineLeft->N = lenRacelineLeft;
+    RaceLineLeft->Dsafe = 1.51;
+    RaceLineLeft->PTP_on = 0;
+    RaceLineLeft->Sref = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Xref = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Yref = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Aref = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Kref = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Lmax = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Lmin = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->S = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->L = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->X = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Y = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->A = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->dA = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->K = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->V = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->AN = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->AT = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->Vs = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->ANs = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->ATs = std::vector<double>(RaceLineLeft->N);
+    RaceLineLeft->TIME = std::vector<double>(RaceLineLeft->N);
+
+    RaceLineRight->N = lenRacelineRight;
+    RaceLineRight->Dsafe = 1.51;
+    RaceLineRight->PTP_on = 0;
+    RaceLineRight->Sref = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Xref = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Yref = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Aref = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Kref = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Lmax = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Lmin = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->S = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->L = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->X = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Y = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->A = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->dA = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->K = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->V = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->AN = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->AT = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->Vs = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->ANs = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->ATs = std::vector<double>(RaceLineRight->N);
+    RaceLineRight->TIME = std::vector<double>(RaceLineRight->N);
+
+    SouthRaceLine->N = lenSouthRaceline;
+    SouthRaceLine->Dsafe = 1.51;
+    SouthRaceLine->PTP_on = 0;
+    SouthRaceLine->Sref = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Xref = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Yref = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Aref = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Kref = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Lmax = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Lmin = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->S = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->L = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->X = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Y = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->A = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->dA = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->K = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->V = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->AN = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->AT = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->Vs = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->ANs = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->ATs = std::vector<double>(SouthRaceLine->N);
+    SouthRaceLine->TIME = std::vector<double>(SouthRaceLine->N);
+
+    SouthRaceLineLeft->N = lenSouthRacelineLeft;
+    SouthRaceLineLeft->Dsafe = 1.51;
+    SouthRaceLineLeft->PTP_on = 0;
+    SouthRaceLineLeft->Sref = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Xref = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Yref = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Aref = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Kref = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Lmax = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Lmin = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->S = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->L = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->X = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Y = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->A = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->dA = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->K = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->V = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->AN = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->AT = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->Vs = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->ANs = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->ATs = std::vector<double>(SouthRaceLineLeft->N);
+    SouthRaceLineLeft->TIME = std::vector<double>(SouthRaceLineLeft->N);
+
+    SouthRaceLineRight->N = lenSouthRacelineRight;
+    SouthRaceLineRight->Dsafe = 1.51;
+    SouthRaceLineRight->PTP_on = 0;
+    SouthRaceLineRight->Sref = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Xref = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Yref = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Aref = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Kref = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Lmax = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Lmin = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->S = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->L = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->X = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Y = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->A = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->dA = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->K = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->V = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->AN = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->AT = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->Vs = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->ANs = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->ATs = std::vector<double>(SouthRaceLineRight->N);
+    SouthRaceLineRight->TIME = std::vector<double>(SouthRaceLineRight->N);
+
+    PitLine1->N = lenPitline1;
+    PitLine1->Dsafe = 1.51;
+    PitLine1->PTP_on = 0;
+    PitLine1->Sref = std::vector<double>(PitLine1->N);
+    PitLine1->Xref = std::vector<double>(PitLine1->N);
+    PitLine1->Yref = std::vector<double>(PitLine1->N);
+    PitLine1->Aref = std::vector<double>(PitLine1->N);
+    PitLine1->Kref = std::vector<double>(PitLine1->N);
+    PitLine1->Lmax = std::vector<double>(PitLine1->N);
+    PitLine1->Lmin = std::vector<double>(PitLine1->N);
+    PitLine1->S = std::vector<double>(PitLine1->N);
+    PitLine1->L = std::vector<double>(PitLine1->N);
+    PitLine1->X = std::vector<double>(PitLine1->N);
+    PitLine1->Y = std::vector<double>(PitLine1->N);
+    PitLine1->A = std::vector<double>(PitLine1->N);
+    PitLine1->dA = std::vector<double>(PitLine1->N);
+    PitLine1->K = std::vector<double>(PitLine1->N);
+    PitLine1->V = std::vector<double>(PitLine1->N);
+    PitLine1->AN = std::vector<double>(PitLine1->N);
+    PitLine1->AT = std::vector<double>(PitLine1->N);
+    PitLine1->Vs = std::vector<double>(PitLine1->N);
+    PitLine1->ANs = std::vector<double>(PitLine1->N);
+    PitLine1->ATs = std::vector<double>(PitLine1->N);
+    PitLine1->TIME = std::vector<double>(PitLine1->N);
+
+    PitLine2->N = lenPitline2;
+    PitLine2->Dsafe = 1.51;
+    PitLine2->PTP_on = 0;
+    PitLine2->Sref = std::vector<double>(PitLine2->N);
+    PitLine2->Xref = std::vector<double>(PitLine2->N);
+    PitLine2->Yref = std::vector<double>(PitLine2->N);
+    PitLine2->Aref = std::vector<double>(PitLine2->N);
+    PitLine2->Kref = std::vector<double>(PitLine2->N);
+    PitLine2->Lmax = std::vector<double>(PitLine2->N);
+    PitLine2->Lmin = std::vector<double>(PitLine2->N);
+    PitLine2->S = std::vector<double>(PitLine2->N);
+    PitLine2->L = std::vector<double>(PitLine2->N);
+    PitLine2->X = std::vector<double>(PitLine2->N);
+    PitLine2->Y = std::vector<double>(PitLine2->N);
+    PitLine2->A = std::vector<double>(PitLine2->N);
+    PitLine2->dA = std::vector<double>(PitLine2->N);
+    PitLine2->K = std::vector<double>(PitLine2->N);
+    PitLine2->V = std::vector<double>(PitLine2->N);
+    PitLine2->AN = std::vector<double>(PitLine2->N);
+    PitLine2->AT = std::vector<double>(PitLine2->N);
+    PitLine2->Vs = std::vector<double>(PitLine2->N);
+    PitLine2->ANs = std::vector<double>(PitLine2->N);
+    PitLine2->ATs = std::vector<double>(PitLine2->N);
+    PitLine2->TIME = std::vector<double>(PitLine2->N);
+
+    PassLine->N = 100;
+    PassLine->Dsafe = 1.51;
+    PassLine->PTP_on = 0;
+    PassLine->Sref = std::vector<double>(PassLine->N);
+    PassLine->Xref = std::vector<double>(PassLine->N);
+    PassLine->Yref = std::vector<double>(PassLine->N);
+    PassLine->Aref = std::vector<double>(PassLine->N);
+    PassLine->Kref = std::vector<double>(PassLine->N);
+    PassLine->Lmax = std::vector<double>(PassLine->N);
+    PassLine->Lmin = std::vector<double>(PassLine->N);
+    PassLine->S = std::vector<double>(PassLine->N);
+    PassLine->L = std::vector<double>(PassLine->N);
+    PassLine->X = std::vector<double>(PassLine->N);
+    PassLine->Y = std::vector<double>(PassLine->N);
+    PassLine->A = std::vector<double>(PassLine->N);
+    PassLine->dA = std::vector<double>(PassLine->N);
+    PassLine->K = std::vector<double>(PassLine->N);
+    PassLine->V = std::vector<double>(PassLine->N);
+    PassLine->AN = std::vector<double>(PassLine->N);
+    PassLine->AT = std::vector<double>(PassLine->N);
+    PassLine->Vs = std::vector<double>(PassLine->N);
+    PassLine->ANs = std::vector<double>(PassLine->N);
+    PassLine->ATs = std::vector<double>(PassLine->N);
+    PassLine->TIME = std::vector<double>(PassLine->N);
+
+    try {
+        ReadVehicle(CarDataFilename);
+        ReadBaseLine(BaseLineFilename, BaseLine);
+        ReadBaseLine(PitLine1Filename, PitBaseLine);
+
+        ReadRaceLine(RaceLineFilename, RaceLine);
+        ReadRaceLine(RaceLineLeftFilename, RaceLineLeft);
+        ReadRaceLine(RaceLineRightFilename, RaceLineRight);
+
+        ReadRaceLine(SouthRaceLineFilename, SouthRaceLine);
+        ReadRaceLine(SouthRaceLineLeftFilename, SouthRaceLineLeft);
+        ReadRaceLine(SouthRaceLineRightFilename, SouthRaceLineRight);
+
+        ReadRaceLine(PitLine1Filename, PitLine1);
+        ReadRaceLine(PitLine2Filename, PitLine2);
+
+        is_init = true;
+    } catch (const std::exception &e) {
+        printf("Error: %s\n", e.what());
+    }
+}
+
+int OptPlanner::ReadVehicle(const std::string &filename) {
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+
+    std::string line;
+
+    // 读取第一行，跳过标题
+    std::getline(file, line);
+
+    // 读取 1 - count < Vehicle->N 行数据
+    int count = 0;
+    while (std::getline(file, line) && count < Vehicle->N) {
+        std::istringstream iss(line);
+        std::string token;
+
+        std::getline(iss, token, ',');
+        Vehicle->V[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        Vehicle->Aw[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        Vehicle->An[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        Vehicle->Ae0[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        Vehicle->Ae1[count] = std::stod(token);
+
+        count++;
+    }
+
+    file.close();
+
+    return 0;
+}
+
+int OptPlanner::ReadBaseLine(const std::string &filename, std::shared_ptr<TRACKdata> BaseLine) {
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+
+    std::string line;
+
+    // 读取第一行，跳过标题
+    std::getline(file, line);
+
+    // 读取数据行
+    int count = 0;
+    while (std::getline(file, line) && count < BaseLine->N) {
+        std::istringstream iss(line);
+        std::string token;
+
+        // 读取每一列数据并赋值
+        std::getline(iss, token, ',');
+        BaseLine->Sref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        BaseLine->Xref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        BaseLine->Yref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        BaseLine->Aref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        BaseLine->Kref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        BaseLine->Lmax[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        BaseLine->Lmin[count] = std::stod(token);
+
+        count++;
+    }
+
+    file.close();
+
+    return 0;
+}
+
+int OptPlanner::ReadRaceLine(const std::string &filename, std::shared_ptr<TRAJdata> RaceLine) {
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+
+    std::string line;
+    std::getline(file, line);  // 读取第一行，跳过标题
+
+    int count = 0;
+    while (std::getline(file, line) && count < RaceLine->N) {
+        std::istringstream iss(line);
+        std::string token;
+
+        std::getline(iss, token, ',');
+        RaceLine->Sref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Xref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Yref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Aref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Kref[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Lmax[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Lmin[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->S[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->L[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->X[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Y[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->A[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->dA[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->K[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->V[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->AN[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->AT[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->Vs[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->ANs[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->ATs[count] = std::stod(token);
+
+        std::getline(iss, token, ',');
+        RaceLine->TIME[count] = std::stod(token);
+
+        count++;
+    }
+
+    file.close();
+    return 0;
+}
+
+/* =============== DenseToSparseCCS.c =============== */
+void OptPlanner::DenseToSparseCCS(const MatrixXd &M, std::vector<int> &Mjc, std::vector<int> &Mir, std::vector<double> &Mpr) {
+    SparseMatrix<double> M_sparse = M.sparseView();
+
+    int numCols = M_sparse.outerSize();
+    int numNonZeros = M_sparse.nonZeros();
+
+    Mjc.resize(numCols + 1);
+    Mir.resize(numNonZeros);
+    Mpr.resize(numNonZeros);
+
+    int idx = 0, col;
+    for (col = 0; col < numCols; ++col) {
+        Mjc[col] = idx;
+
+        for (SparseMatrix<double>::InnerIterator it(M_sparse, col); it; ++it) {
+            Mir[idx] = it.row();
+            Mpr[idx] = it.value();
+            ++idx;
+        }
+    }
+
+    Mjc[numCols] = numNonZeros;
+};
+
+/* =============== MyInterp.c =============== */
+double OptPlanner::Interp1(std::vector<double> X, std::vector<double> Y, int N, double x) {
+    double V1, V2, A1, A2;
+    if (x <= X[0]) {
+        return Y[0];
+    } else if (x >= X[N - 1]) {
+        return Y[N - 1];
+    } else {
+        for (int i = 1; i < N; ++i) {
+            if (x < X[i]) {
+                V1 = X[i - 1];
+                V2 = X[i];
+                A1 = Y[i - 1];
+                A2 = Y[i];
+                return A1 + (A2 - A1) * (x - V1) / (V2 - V1);
+            }
+        }
+        return Y[N - 1];
+    }
+}
+
+void OptPlanner::Linear(double k, double v, double l, double a, MatrixXd &A, MatrixXd &B, VectorXd &b) {
+    /* Initialization */
+    A.setZero();
+    B.setZero();
+    b.setZero();
+
+    /* State Matrix */
+    /* Offset */
+    A(0, 0) = -k * tan(a);
+    A(0, 1) = (1 - k * l) / (cos(a) * cos(a));
+    b(0) = (1 - k * l) * tan(a);
+
+    /* Angle Offset */
+    b(1) = -k;
+
+    Vector2d temp;
+    temp << l, a;
+    b = b - A * temp;
+
+    /* Control Matrix */
+    B(1, 0) = (1 - k * l) / (v * v * cos(a));
+}
+
+/* =============== VelSim.c =============== */
+void OptPlanner::VelSim(const std::shared_ptr<TRAJdata> theLine) {
+    /* =============== Data Structure =============== */
+    int i, N = theLine->N;
+    double Vdes, Kdes, ATdes, ds, dv, dt, Aemax;
+    double vt, at, at_min, at_max;
+
+    std::vector<double> TIME(N), V(N), AT(N), AN(N);
+
+    /* =============== Simulation =============== */
+    V[0] = theLine->V[0];
+    TIME[0] = 0.0;
+
+    for (i = 0; i < N - 1; i++) {
+        ds = theLine->S[i + 1] - theLine->S[i];
+
+        Vdes = theLine->V[i];
+        Kdes = theLine->K[i];
+        ATdes = theLine->AT[i];
+
+        AT[i] = ATdes - 10 * (V[i] - Vdes);
+        AN[i] = Kdes * V[i] * V[i];
+
+        // if (AT[i] >= 0 && V[i] >= 30 && V[i] <= _v_max)
+        // {
+        //     if (theLine->PTP_on == 0)
+        //         Aemax = Interp1(Vehicle->V, Vehicle->Ae0, Vehicle->N, V[i]);
+        //     else
+        //         Aemax = Interp1(Vehicle->V, Vehicle->Ae1, Vehicle->N, V[i]);
+
+        //     if (AT[i] >= Aemax)
+        //     {
+        //         AT[i] = Aemax;
+        //     }
+        // }
+
+        vt = V[i];
+        at = AT[i];
+
+        if (vt <= 10) {
+            vt = 10;
+        } else if (vt >= 75) {
+            vt = 75;
+        }
+
+        // -----------------把下面的注释了，取消速度矫正---------------------
+        if (at > 0 && vt >= 30) {
+            if (theLine->PTP_on == 1) {
+                at_max = Interp1(Vehicle->V, Vehicle->Ae1, Vehicle->N, vt);
+            } else {
+                at_max = Interp1(Vehicle->V, Vehicle->Ae0, Vehicle->N, vt);
+        }
+            if (at > at_max) {
+                at = at_max;
+            }
+        }
+
+        if (at > 0) {
+            at_max = Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, vt);
+            if (at > at_max) {
+                at = at_max;
+            }
+        }
+        // // ---------------------------------------------------------------
+
+        if (at < 0) {
+            at_min = -Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, vt);
+            if (at < at_min) {
+                at = at_min;
+            }
+        }
+
+        AT[i] = at;
+        dv = AT[i] - Vehicle->CD * V[i] * V[i] / Vehicle->Mass;
+
+        if (V[i] < 5)
+            dt = ds / 5;
+        else
+            dt = ds / V[i];
+
+        V[i + 1] = V[i] + dv * dt;
+        TIME[i + 1] = TIME[i] + dt;
+    }
+
+    AT[N - 1] = theLine->AT[N - 1];
+    AN[N - 1] = theLine->AN[N - 1];
+
+    for (i = 0; i < N; i++) {
+        theLine->TIME[i] = TIME[i];
+        theLine->Vs[i] = V[i];
+        theLine->ATs[i] = AT[i];
+        theLine->ANs[i] = AN[i];
+    }
+}
+
+/* =============== wrapToPi.c =============== */
+double OptPlanner::wrapToPi(double angle) {
+    while (angle > M_PI)
+        angle -= 2 * M_PI;
+    while (angle < -M_PI)
+        angle += 2 * M_PI;
+    return angle;
+}
+
+double OptPlanner::wrapToFirstAngle(double reference_angle, double angle) {
+    while (angle - reference_angle > M_PI) {
+        angle -= 2 * M_PI;
+    }
+    while (angle - reference_angle < -M_PI) {
+        angle += 2 * M_PI;
+    }
+    return angle;
+}
+
+// -----------------------------------------------------------------------------x y state trans to s l start---------------------------------------------------------------------------------
+
+/* =============== StateTrans.c =============== */
+void OptPlanner::StateTrans(const std::shared_ptr<STATE> State, std::shared_ptr<TRAJdata> RaceLine) {
+    int i, j, idx = 0, st_len;
+    double err, err_min, vx, vy, wx, wy, x1, x2, y1, y2;
+    double st[101] = {0.0}, xt[101] = {0.0}, yt[101] = {0.0}, at[101] = {0.0};
+
+    for (j = 0; j < State->N; j++) {
+        /* Find the Nearest WayPoint */
+        err_min = INFINITY;
+        for (i = 0; i < RaceLine->N - 1; i++) {
+            err = pow(State->x[j] - RaceLine->Xref[i], 2) + pow(State->y[j] - RaceLine->Yref[i], 2);
+            if (err < err_min) {
+                err_min = err;
+                idx = i;
+            }
+        }
+
+        /* Generate Interpolation Points */
+        if (idx == 0) {
+            x1 = RaceLine->Xref[0] + RaceLine->Lmax[0] * cos(RaceLine->Aref[0] + M_PI / 2);
+            y1 = RaceLine->Yref[0] + RaceLine->Lmax[0] * sin(RaceLine->Aref[0] + M_PI / 2);
+            x2 = RaceLine->Xref[0] + RaceLine->Lmin[0] * cos(RaceLine->Aref[0] + M_PI / 2);
+            y2 = RaceLine->Yref[0] + RaceLine->Lmin[0] * sin(RaceLine->Aref[0] + M_PI / 2);
+
+            st_len = 51;
+            if (State->x[j] >= x1 + (x2 - x1) / (y2 - y1) * (State->y[j] - y1)) {
+                for (i = 0; i < st_len; i++) {
+                    st[i] = RaceLine->Sref[0] + i * (RaceLine->Sref[2] - RaceLine->Sref[0]) / (st_len - 1);
+                }
+            } else {
+                for (i = 0; i < st_len; i++) {
+                    st[i] = RaceLine->Sref[RaceLine->N - 3] + i * (RaceLine->Sref[RaceLine->N - 1] - RaceLine->Sref[RaceLine->N - 3]) / (st_len - 1);
+                }
+            }
+        } else if (idx == 1) {
+            st_len = 76;
+            for (i = 0; i < st_len; i++) {
+                st[i] = RaceLine->Sref[0] + i * (RaceLine->Sref[3] - RaceLine->Sref[0]) / (st_len - 1);
+            }
+        } else if (idx == RaceLine->N - 2) {
+            st_len = 76;
+            for (i = 0; i < st_len; i++) {
+                st[i] = RaceLine->Sref[RaceLine->N - 4] + i * (RaceLine->Sref[RaceLine->N - 1] - RaceLine->Sref[RaceLine->N - 4]) / (st_len - 1);
+            }
+        } else {
+            st_len = 101;
+            for (i = 0; i < st_len; i++) {
+                st[i] = RaceLine->Sref[idx - 2] + i * (RaceLine->Sref[idx + 2] - RaceLine->Sref[idx - 2]) / (st_len - 1);
+            }
+        }
+
+        /* Generate Interpolation Points */
+        for (i = 0; i < st_len; i++) {
+            xt[i] = Interp1(RaceLine->Sref, RaceLine->Xref, RaceLine->N, st[i]);
+            yt[i] = Interp1(RaceLine->Sref, RaceLine->Yref, RaceLine->N, st[i]);
+            at[i] = Interp1(RaceLine->Sref, RaceLine->Aref, RaceLine->N, st[i]);
+        }
+
+        /* Find the New Nearest WayPoint */
+        err_min = INFINITY;
+        for (i = 0; i < st_len; i++) {
+            err = pow(State->x[j] - xt[i], 2) + pow(State->y[j] - yt[i], 2);
+            if (err < err_min) {
+                err_min = err;
+                idx = i;
+            }
+        }
+
+        vx = cos(at[idx]);
+        vy = sin(at[idx]);
+        wx = State->x[j] - xt[idx];
+        wy = State->y[j] - yt[idx];
+
+        State->s[j] = st[idx];
+        State->l[j] = copysign(1.0, vx * wy - wx * vy) * sqrt(wx * wx + wy * wy);
+        State->da[j] = wrapToPi(State->a[j] - wrapToPi(at[idx]));
+    }
+}
+
+// -----------------------------------------------------------------------------x y state trans to s l end---------------------------------------------------------------------------------
+
+double OptPlanner::Adjust(double v_now, double v_des, double at_ref, int PTP_on) {
+    double at = at_ref - 10 * (v_now - v_des);
+    double vt = v_now;
+    double at_max, at_min;
+
+    if (vt <= 10) {
+        vt = 10;
+    } else if (vt >= 75) {
+        vt = 75;
+    }
+
+    if (at > 0 && v_now >= 30) {
+        if (PTP_on == 1) {
+            at_max = Interp1(Vehicle->V, Vehicle->Ae1, Vehicle->N, vt);
+        } else {
+            at_max = Interp1(Vehicle->V, Vehicle->Ae0, Vehicle->N, vt);
+        }
+        if (at > at_max) {
+            at = at_max;
+    }
+    }
+
+    if (at > 0) {
+        at_max = Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, vt);
+        if (at > at_max) {
+            at = at_max;
+        }
+    }
+
+    if (at < 0) {
+        at_min = -Interp1(Vehicle->V, Vehicle->Aw, Vehicle->N, vt);
+        if (at < at_min) {
+            at = at_min;
+        }
+    }
+
+    double dv = at - Vehicle->CD * v_now * v_now / Vehicle->Mass;
+    double v_c = v_now + dv * out_point_dt;
+
+    return v_c;
+}
+
+/**
+ * @brief C++ version of MATLAB's linspace. Generates a linearly spaced std::vector of arithmetic values between a start and end point.
+ *
+ * @tparam T The type of the values, which must be an arithmetic type (e.g., int, float, double).
+ * @param start The starting value of the sequence.
+ * @param end The ending value of the sequence.
+ * @param num_points The number of points to generate in the sequence. Defaults to 100.
+ *                   - If num_points is 0, an empty std::vector is returned.
+ *                   - If num_points is 1, a std::vector containing only the start value is returned.
+ * @return std::vector<T> A std::vector containing `num_points` linearly spaced values between `start` and `end`.
+ *
+ * @note The function ensures that the last value in the sequence is exactly equal to `end`,
+ *       mitigating potential floating-point precision errors.
+ */
+template <typename T>
+std::vector<typename std::enable_if<std::is_arithmetic<T>::value, T>::type>
+OptPlanner::linspace(T start, T end, size_t num_points) {
+    if (num_points == 0) {
+        return {};
+    }
+    if (num_points == 1) {
+        return {start};
+    }
+
+    std::vector<T> result;
+    result.reserve(num_points);
+
+    double delta = static_cast<double>(end - start) / (num_points - 1);
+
+    for (size_t i = 0; i < num_points; ++i) {
+        result.push_back(static_cast<T>(start + i * delta));
+    }
+
+    // 确保最后一个点精确等于end，避免浮点误差累积
+    if (num_points > 1) {
+        result.back() = end;
+    }
+
+    return result;
+}
+
+void OptPlanner::printf(const char *format, ...) {
+    // 打印类名作为前缀
+    std::printf("[OptPlanner] ");
+
+    // 处理可变参数
+    va_list args;
+    va_start(args, format);
+    std::vprintf(format, args);
+    va_end(args);
+}

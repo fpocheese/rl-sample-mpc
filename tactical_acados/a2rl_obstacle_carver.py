@@ -26,6 +26,7 @@ class CarverMode(Enum):
     OVERTAKE = auto()
     FOLLOW   = auto()
     SHADOW   = auto()
+    HOLD     = auto()
     RACELINE = auto()
 
 
@@ -75,31 +76,31 @@ class A2RLObstacleCarver:
         self.w_r_offset = +1.5
 
         # common
-        self.opp_half_w         = 1.2
-        self.opp_clearance      = 2.0
-        self.min_corridor       = 3.5
-        self.smooth_kernel_size = 11
+        self.opp_half_w         = 1.5     # v5: wider exclusion (was 1.2)
+        self.opp_clearance      = 2.5     # v5: more clearance (was 2.0)
+        self.min_corridor       = 3.0     # v5: ACADOS needs vw/2+safety each side ≈ 1.5 each
+        self.smooth_kernel_size = 5       # v5: reduced smoothing (was 11) to preserve exclusion
         self.safety_s           = 60.0
         self.latch_dist         = 30.0
         self.V_max              = 80.0
 
         # OVERTAKE
         self.draft_min_width    = 7.0
-        self.fade_start         = 20.0
-        self.fade_end           = 12.0
-        self.hint_intensity     = 0.2
+        self.fade_start         = 30.0    # v5: start hinting earlier (was 20)
+        self.fade_end           = 15.0    # v5: (was 12)
+        self.hint_intensity     = 0.3     # v5: stronger hint (was 0.2)
 
         # FOLLOW (draft: directly behind)
-        self.follow_gap_target  = 8.0
+        self.follow_gap_target  = 10.0    # v5: shortened from 8 → 12 (was too close for PID)
         self.follow_gap_min     = 3.0
         self.follow_funnel_half = 1.5
 
         # SHADOW (pull-out: side-rear)
-        self.shadow_gap_target  = 10.0
+        self.shadow_gap_target  = 10.0    # v5: shortened from 10 → 12 (close but not collision)
         self.shadow_lateral_offset = 3.5
         self.shadow_funnel_half = 2.5
-        self.shadow_ot_gap_thr  = 18.0   # early overtake trigger
-        self.shadow_ot_space    = 2.5
+        self.shadow_ot_gap_thr  = 20.0    # v5: widen overtake trigger range (was 18)
+        self.shadow_ot_space    = 2.0     # v5: lower space required (was 2.5)
 
         # RACELINE
         self.raceline_funnel_half  = 2.0
@@ -184,6 +185,32 @@ class A2RLObstacleCarver:
                 ego_state, opp_states, s_arr, s_wrapped, t_arr,
                 w_left, w_right, w_l_base, w_r_base,
                 max_v_node, side, target_opp_id)
+        elif mode == CarverMode.HOLD:
+            # v5 HOLD: Keep current overtake corridor, PID to maintain s-gap
+            # Key: NEVER slow down substantially — maintain position alongside opp
+            side = overtake_side if overtake_side else self._overtake_side
+            self._overtake_side = side
+            # Reuse overtake corridor shaping (keeps the passing lane open)
+            speed_cap, speed_scale = self._mode_overtake(
+                ego_state, opp_states, s_arr, s_wrapped, t_arr,
+                w_left, w_right, w_l_base, w_r_base,
+                max_v_node, side)
+            # Override speed: maintain current gap, don't fall behind
+            target = self._find_target(ego_state, opp_states, target_opp_id)
+            if target is not None:
+                leader_V = target.get('V', 30.0)
+                gap_current = self._signed_gap(target['s'], ego_state['s'])
+                # PID target = current gap (clamped to reasonable range)
+                hold_gap_target = float(np.clip(gap_current, 3.0, 15.0))
+                speed_cmd = self._follow_pid.compute(
+                    hold_gap_target, gap_current, leader_V)
+                speed_cap = float(np.clip(speed_cmd,
+                                          leader_V * 0.99,  # NEVER slow below leader
+                                          self.V_max))
+            # Also check if overtake window re-opened
+            if target is not None:
+                self._overtake_ready = self._check_overtake_window(
+                    ego_state, target, side)
         elif mode == CarverMode.RACELINE:
             speed_cap, speed_scale = self._mode_raceline(
                 ego_state, s_arr, s_wrapped,
@@ -238,6 +265,11 @@ class A2RLObstacleCarver:
             opp_s_nodes = np.interp(t_arr[:max_v_node], t_opp, opp_s_traj)
             opp_n_nodes = np.interp(t_arr[:max_v_node], t_opp, opp_n_traj)
 
+            # v5: Also use actual current opp position for early nodes
+            # to prevent prediction mismatch causing collisions
+            actual_opp_s = opp['s']
+            actual_opp_n = opp['n']
+
             closest_node, closest_gap = -1, 999.0
             for i in range(max_v_node):
                 gap = self._signed_gap(opp_s_nodes[i], s_arr[i])
@@ -262,16 +294,30 @@ class A2RLObstacleCarver:
 
             for i in range(max_v_node):
                 ds_raw = self._signed_gap(opp_s_nodes[i], s_arr[i])
-                if ds_raw < -4.0:
+                # v5: Also check against actual opp position for early nodes
+                ds_actual = self._signed_gap(actual_opp_s, s_arr[i])
+                # Use whichever opp position is closer (predicted or actual)
+                if abs(ds_actual) < abs(ds_raw) and abs(ds_actual) < 15.0:
+                    use_opp_n = actual_opp_n
+                    use_ds_raw = ds_actual
+                else:
+                    use_opp_n = opp_n_nodes[i]
+                    use_ds_raw = ds_raw
+                if use_ds_raw < -8.0:
                     continue
-                ds_abs = abs(ds_raw)
+                ds_abs = abs(use_ds_raw)
                 if ds_abs >= self.safety_s:
                     continue
 
                 fade = self._cosine_fade(ds_abs, self.safety_s)
                 fade *= self._startup_ramp(i)
                 excl_n = (self.opp_half_w + self.opp_clearance) * fade
-                opp_n = opp_n_nodes[i]
+                # v5: enforce minimum lateral exclusion when very close
+                # Note: ACADOS adds veh_width/2 + safety_dist (~1.5m) on top
+                # so excl_n = 2.0 → actual gap ≈ 3.5m from opp center
+                if ds_abs < 15.0:
+                    excl_n = max(excl_n, 2.0)
+                opp_n = use_opp_n
 
                 if ds_abs > self.fade_start:
                     blend = 1.0
@@ -433,7 +479,7 @@ class A2RLObstacleCarver:
     # Heuristic side decision
     # ==================================================================
     def _decide_shadow_side(self, ego_state, opp_states):
-        """Auto-select shadow side based on space + curvature."""
+        """Auto-select shadow side based on space + curvature + inner-line preference."""
         target = self._find_target(ego_state, opp_states)
         if target is None:
             return self._shadow_side or 'left'
@@ -451,19 +497,17 @@ class A2RLObstacleCarver:
         space_l = w_l - (opp_n + self.opp_half_w)
         space_r = (opp_n - self.opp_half_w) - w_r
 
-        try:
-            curv = float(np.interp(
-                s_at, self.track_handler.s,
-                getattr(self.track_handler, 'dtheta_radpm',
-                        np.zeros_like(self.track_handler.s)),
-                period=self.track_len))
-        except Exception:
-            curv = 0.0
-
-        if curv > 0.005:
-            space_l += 1.5
-        elif curv < -0.005:
-            space_r += 1.5
+        # Inner-line preference: check upcoming curvature over 50m window
+        s_look = np.linspace(s_at, s_at + 50.0, 10) % self.track_len
+        omega_vals = np.interp(s_look, self.track_handler.s,
+                               self.track_handler.Omega_z,
+                               period=self.track_len)
+        avg_curv = float(np.mean(omega_vals))
+        # Omega_z > 0 → turning left → inner = right; < 0 → inner = left
+        if avg_curv > 0.005:
+            space_r += 2.5   # v5: strong inner-line preference (was 1.5)
+        elif avg_curv < -0.005:
+            space_l += 2.5
 
         if self._shadow_side is not None:
             if self._shadow_side == 'left':
@@ -500,18 +544,16 @@ class A2RLObstacleCarver:
     def _choose_side(self, opp_idx, opp_n, w_l, w_r, gap, s_at):
         space_l = w_l - (opp_n + self.opp_half_w)
         space_r = (opp_n - self.opp_half_w) - w_r
-        try:
-            curv = np.interp(
-                s_at % self.track_len, self.track_handler.s,
-                getattr(self.track_handler, 'dtheta_radpm',
-                        np.zeros_like(self.track_handler.s)),
-                period=self.track_len)
-        except Exception:
-            curv = 0.0
-        if curv > 0.005:
-            space_l += 1.0
-        elif curv < -0.005:
-            space_r += 1.0
+        # Inner-line preference: sample curvature over next 50m
+        s_look = np.linspace(s_at, s_at + 50.0, 10) % self.track_len
+        omega_vals = np.interp(s_look, self.track_handler.s,
+                               self.track_handler.Omega_z,
+                               period=self.track_len)
+        avg_curv = float(np.mean(omega_vals))
+        if avg_curv > 0.005:
+            space_r += 2.5   # v5: strong inner-line preference
+        elif avg_curv < -0.005:
+            space_l += 2.5
         natural_side = 'left' if space_l >= space_r else 'right'
         if gap < self.latch_dist and opp_idx in self._prev_side:
             return self._prev_side[opp_idx]
@@ -521,6 +563,7 @@ class A2RLObstacleCarver:
     # Overtake window
     # ==================================================================
     def _check_overtake_window(self, ego_state, target, shadow_side):
+        """v5: More aggressive overtake trigger — don't hesitate."""
         if target is None:
             return False
         gap = self._signed_gap(target['s'], ego_state['s'])
@@ -541,10 +584,8 @@ class A2RLObstacleCarver:
         if space < self.shadow_ot_space:
             return False
         dV = ego_state['V'] - target.get('V', 30.0)
-        if dV < -15.0:
-            return False
-        # If ego much faster than opp, closing too fast → not safe to overtake
-        if dV > 30.0:
+        # v5: only reject if ego is WAY slower (was -15)
+        if dV < -20.0:
             return False
         return True
 

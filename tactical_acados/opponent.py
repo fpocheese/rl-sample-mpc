@@ -97,7 +97,11 @@ class OpponentVehicle:
         target_n = rl_n + self.target_n_offset
 
         # Smooth lateral transition
-        alpha_n = min(dt * 2.0, 1.0)  # smooth factor
+        # v5: yield faster when yielding
+        if self.tactic == 'yield':
+            alpha_n = min(dt * 4.0, 1.0)  # faster lateral move during yield
+        else:
+            alpha_n = min(dt * 2.0, 1.0)  # normal smooth factor
         new_n = self.n + alpha_n * (target_n - self.n)
 
         # Clip to track bounds
@@ -127,15 +131,57 @@ class OpponentVehicle:
         self._update_cartesian()
 
     def _update_tactic(self, ego_state: dict, new_s: float):
-        """Simple heuristic tactic based on ego position."""
+        """Heuristic tactic based on ego position + race rules.
+
+        Race rule: if a corner is ahead and ego is within 15m behind,
+        the front car must yield 3m toward track center (give the apex).
+        Once ego passes us, resume raceline.
+        """
         track_len = self.track_handler.s[-1]
+        # delta_s < 0 means ego is behind us
         delta_s = ego_state['s'] - new_s
         if delta_s > track_len / 2:
             delta_s -= track_len
         elif delta_s < -track_len / 2:
             delta_s += track_len
 
-        # Ego is behind and closing
+        # --- If currently yielding, check if ego has passed us ---
+        if self.tactic == 'yield':
+            if delta_s > 2.0:
+                # Ego is now ahead — resume raceline
+                self.tactic = 'follow'
+                self.target_n_offset = 0.0
+            return  # keep yielding until ego passes
+
+        # --- Check yield condition: ego behind within 15m + corner ahead ---
+        if delta_s < 0 and abs(delta_s) <= 15.0:
+            # Sample Omega_z over next 50m to detect upcoming corner
+            s_w = new_s % track_len
+            s_look = (s_w + np.linspace(0.0, 50.0, 15)) % track_len
+            omega_vals = np.interp(s_look, self.track_handler.s,
+                                   self.track_handler.Omega_z,
+                                   period=track_len)
+            max_curv = float(np.max(np.abs(omega_vals)))
+
+            if max_curv > 0.015:
+                # Corner ahead — yield: shift 3m toward track center
+                # Track center n ≈ (w_left + w_right) / 2
+                w_l = float(np.interp(s_w, self.track_handler.s,
+                                      self.track_handler.w_tr_left,
+                                      period=track_len))
+                w_r = float(np.interp(s_w, self.track_handler.s,
+                                      self.track_handler.w_tr_right,
+                                      period=track_len))
+                center_n = 0.5 * (w_l + w_r)
+                # direction: move from current n toward center
+                if self.n < center_n:
+                    self.target_n_offset = 3.0   # shift left (toward positive n)
+                else:
+                    self.target_n_offset = -3.0  # shift right (toward negative n)
+                self.tactic = 'yield'
+                return
+
+        # --- Normal defend / follow behaviors ---
         if delta_s < 0 and abs(delta_s) < 30.0:
             delta_n = ego_state['n'] - self.n
             if delta_n > 1.0:
@@ -152,7 +198,9 @@ class OpponentVehicle:
             self.target_n_offset = 0.0
 
     def predict(self, horizon: float = 3.75, n_points: int = 30) -> dict:
-        """Generate prediction for this opponent over horizon."""
+        """Generate prediction for this opponent over horizon.
+        v5: Use current n as starting point and smooth transition to target.
+        """
         track_len = self.track_handler.s[-1]
         t_pred = np.linspace(0.0, horizon, n_points)
 
@@ -166,9 +214,17 @@ class OpponentVehicle:
         s_pred = np.interp(t_pred, t_rl,
                            s_rl[0] + self.speed_scale * (s_rl - s_rl[0]))
         s_pred = s_pred % track_len
-        n_pred = np.interp(s_pred, raceline['s'] % track_len, raceline['n'],
-                           period=track_len)
-        n_pred += self.target_n_offset
+        # Target n = raceline + offset
+        n_target = np.interp(s_pred, raceline['s'] % track_len, raceline['n'],
+                             period=track_len)
+        n_target += self.target_n_offset
+
+        # v5: smooth transition from current actual n to target n
+        # (prevents prediction from jumping ahead of actual NPC position)
+        n_pred = np.empty_like(n_target)
+        for k in range(n_points):
+            alpha = min(t_pred[k] * 2.0, 1.0)  # same smoothing as step()
+            n_pred[k] = self.n + alpha * (n_target[k] - self.n)
 
         # Clip to track
         w_left = np.interp(s_pred, self.track_handler.s,
@@ -210,6 +266,8 @@ class OpponentVehicle:
             'x': self.x,
             'y': self.y,
             'z': self.z,
+            'tactic': self.tactic,
+            'target_n_offset': self.target_n_offset,
         }
 
 

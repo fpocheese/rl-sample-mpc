@@ -122,6 +122,8 @@ def run_duel(
     _overtake_locked = False   # v4: mode latch — stay in OVERTAKE until done
     _abort_shadow_side = None  # v4.1: when overtake aborts, remember shadow side
     _abort_cooldown = 0        # v4.1: steps to wait before re-entering OVERTAKE
+    _hold_steps = 0            # v5: HOLD mode counter
+    _hold_side = None          # v5: remembered overtake side for HOLD corridor
 
     print("=" * 70)
     print(f"1v1 Duel: {sc['name']}")
@@ -149,45 +151,69 @@ def run_duel(
         nearest_gap = gap if gap > 0 else 999.0
         opp_V = opp_state.get('V', 0.0)
 
-        # 3) Mode selection  (v4.1: OVERTAKE abort → SHADOW with position-based side)
+        # 3) Mode selection  (v5: HOLD mode, aggressive overtake, NPC yield aware)
         if carver_mode == 'auto':
             ot_rdy = a2rl_carver.overtake_ready
-            current_mode = CarverMode.FOLLOW  # default, overwritten below
+            current_mode = CarverMode.RACELINE  # default
+            opp_tactic = opp_state.get('tactic', '')
+            opp_yielding = (opp_tactic == 'yield')
+
             if _abort_cooldown > 0:
                 _abort_cooldown -= 1
-            # If locked in overtake, check abort conditions
+            if _hold_steps > 0:
+                _hold_steps -= 1
+
+            # --- If locked in OVERTAKE, check completion/abort ---
             if _overtake_locked:
-                # Condition 1: passed opponent or gave up (gap growing)
-                abort = (nearest_gap > 25.0 or gap < -5.0)
-                # Condition 2: very close and lateral gap still not safe for passing
-                if not abort and nearest_gap < 10.0:
-                    dn = abs(ego_state['n'] - opp_state['n'])
-                    # Need at least vehicle_width + 0.5m to squeeze through
-                    if dn < cfg.vehicle_width + 0.5:
-                        abort = True
-                        print(f"  [OT_ABORT_SAFETY] gap={nearest_gap:.1f} "
-                              f"dn={dn:.2f} < {cfg.vehicle_width+1.0:.2f}")
-                if abort:
+                # SUCCESS: ego passed opponent (gap negative = ego ahead)
+                if gap < -3.0:
                     _overtake_locked = False
+                    _abort_shadow_side = None
+                    _hold_steps = 0
+                    current_mode = CarverMode.RACELINE
+                    print(f"  [OT_SUCCESS] step={step} ego passed opp! gap={gap:.1f}")
+                # ABORT: gap grew too large and opp is still ahead (lost contact)
+                elif gap > 0 and nearest_gap > 30.0:
+                    _overtake_locked = False
+                    _hold_side = a2rl_carver.current_overtake_side
                     _abort_shadow_side = a2rl_carver.overtake_abort_side(
                         ego_state, opp_states)
-                    _abort_cooldown = 40  # ~5 seconds cooldown before retry
-                    current_mode = CarverMode.SHADOW
-                    print(f"  [OT_ABORT] step={step} → SHADOW {_abort_shadow_side} "
+                    _abort_cooldown = 20
+                    _hold_steps = 60
+                    current_mode = CarverMode.HOLD
+                    print(f"  [OT_ABORT→HOLD] step={step} side={_hold_side} "
                           f"(gap={nearest_gap:.1f})")
                 else:
                     current_mode = CarverMode.OVERTAKE
-            if not _overtake_locked and current_mode != CarverMode.SHADOW:
-                if nearest_gap <= 15.0 and ot_rdy and _abort_cooldown == 0:
+
+            # --- HOLD mode: maintain position, don't fall back ---
+            elif _hold_steps > 0:
+                current_mode = CarverMode.HOLD
+                # If overtake window re-opens during HOLD AND we have safe distance, go for it
+                if (ot_rdy or opp_yielding) and nearest_gap > 5.0 and nearest_gap < 20.0:
                     current_mode = CarverMode.OVERTAKE
                     _overtake_locked = True
-                    _abort_shadow_side = None  # clear abort side
+                    _hold_steps = 0
+                    _abort_cooldown = 0
+                    print(f"  [HOLD→OT] step={step} re-engaging overtake! gap={nearest_gap:.1f}")
+
+            # --- Normal mode selection ---
+            else:
+                if nearest_gap <= 18.0 and ot_rdy and (_abort_cooldown == 0 or opp_yielding):
+                    # v5: aggressive overtake — go for it
+                    current_mode = CarverMode.OVERTAKE
+                    _overtake_locked = True
+                    _abort_shadow_side = None
+                    _hold_side = None
+                    print(f"  [OT_START] step={step} gap={nearest_gap:.1f} "
+                          f"yield={opp_yielding}")
                 elif nearest_gap > 30.0:
                     current_mode = CarverMode.FOLLOW
                     _abort_shadow_side = None
-                elif nearest_gap > 15.0:
+                elif nearest_gap > 18.0:
                     current_mode = CarverMode.SHADOW
                 else:
+                    # Close but not overtake-ready → shadow (prepare)
                     current_mode = CarverMode.SHADOW
         else:
             current_mode = mode_map.get(carver_mode, CarverMode.OVERTAKE)
@@ -199,8 +225,22 @@ def run_duel(
         ds = horizon_m / cfg.N_steps_acados
 
         if carver_mode == 'auto':
-            _shadow_side = _abort_shadow_side   # None → carver decides; set → forced
-            _overtake_side = None
+            if current_mode == CarverMode.HOLD:
+                _shadow_side = _abort_shadow_side
+                _overtake_side = _hold_side  # preserve corridor from last overtake
+            elif current_mode == CarverMode.OVERTAKE and opp_yielding:
+                # v5: When NPC yields, overtake on the OPPOSITE side
+                opp_n_off = opp_state.get('target_n_offset', 0.0)
+                if opp_n_off > 0:
+                    _overtake_side = 'right'  # NPC moved left → overtake right (inner)
+                elif opp_n_off < 0:
+                    _overtake_side = 'left'   # NPC moved right → overtake left (inner)
+                else:
+                    _overtake_side = None
+                _shadow_side = _abort_shadow_side
+            else:
+                _shadow_side = _abort_shadow_side   # None → carver decides
+                _overtake_side = None
         else:
             _shadow_side = shadow_side
             _overtake_side = overtake_side
@@ -247,6 +287,28 @@ def run_duel(
         elif delta_s < -track_len / 2:
             delta_s += track_len
         delta_n = abs(ego_state['n'] - opponent.n)
+
+        # v5: Collision avoidance nudge — if about to collide, push ego sideways
+        if abs(delta_s) < cfg.vehicle_length + 1.0 and delta_n < cfg.vehicle_width + 0.5:
+            # Push ego away from opponent laterally
+            sign = 1.0 if ego_state['n'] >= opponent.n else -1.0
+            needed_gap = cfg.vehicle_width + 0.3
+            current_gap = delta_n
+            nudge = (needed_gap - current_gap) * 0.5  # gradual nudge
+            ego_state['n'] += sign * max(nudge, 0.0)
+            # Re-clip to track bounds
+            s_w = ego_state['s'] % track_len
+            w_l = float(np.interp(s_w, track_handler.s,
+                                  track_handler.w_tr_left, period=track_len))
+            w_r = float(np.interp(s_w, track_handler.s,
+                                  track_handler.w_tr_right, period=track_len))
+            veh_half = cfg.vehicle_width / 2.0
+            ego_state['n'] = float(np.clip(ego_state['n'],
+                                           w_r + veh_half + 0.2,
+                                           w_l - veh_half - 0.2))
+            # Recompute delta_n after nudge
+            delta_n = abs(ego_state['n'] - opponent.n)
+
         # Collision if longitudinal overlap AND lateral overlap
         collision = (abs(delta_s) < cfg.vehicle_length and
                      delta_n < cfg.vehicle_width)
