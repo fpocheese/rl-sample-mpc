@@ -52,6 +52,7 @@ class OpponentVehicle:
         # Tactical state
         self.tactic = 'follow'  # 'follow', 'defend_left', 'defend_right'
         self.target_n_offset = 0.0
+        self._tactic_hold_steps = 0  # v5.2: hysteresis cooldown for defend
 
         # Update Cartesian
         self._update_cartesian()
@@ -182,17 +183,32 @@ class OpponentVehicle:
                 return
 
         # --- Normal defend / follow behaviors ---
+        # v5.2: hysteresis — once a defend direction is chosen, hold it
+        # for at least 8 ticks (~1s) to prevent jittering
+        if self._tactic_hold_steps > 0:
+            self._tactic_hold_steps -= 1
+            return  # keep current tactic
+
         if delta_s < 0 and abs(delta_s) < 30.0:
             delta_n = ego_state['n'] - self.n
-            if delta_n > 1.0:
-                self.tactic = 'defend_left'
-                self.target_n_offset = 0.5
-            elif delta_n < -1.0:
-                self.tactic = 'defend_right'
-                self.target_n_offset = -0.5
+            # Use wider dead-zone (±2.0) and only switch when clearly on other side
+            if delta_n > 2.0:
+                new_tactic = 'defend_left'
+                new_offset = 0.5
+            elif delta_n < -2.0:
+                new_tactic = 'defend_right'
+                new_offset = -0.5
             else:
-                self.tactic = 'defend_center'
-                self.target_n_offset = 0.0
+                # Inside dead-zone: keep previous defend direction, or center
+                if self.tactic in ('defend_left', 'defend_right'):
+                    return  # hold current defend
+                new_tactic = 'defend_center'
+                new_offset = 0.0
+
+            if new_tactic != self.tactic:
+                self._tactic_hold_steps = 8  # hold for ~1s
+            self.tactic = new_tactic
+            self.target_n_offset = new_offset
         else:
             self.tactic = 'follow'
             self.target_n_offset = 0.0

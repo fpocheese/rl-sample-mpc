@@ -180,14 +180,14 @@ def run_duel(
 
             # --- If locked in OVERTAKE, check completion/abort ---
             elif _overtake_locked:
-                # ABORT: gap growing — earlier detection (was 30, now 25)
+                # ABORT: gap growing
                 if gap > 0 and nearest_gap > 25.0:
                     _overtake_locked = False
                     _hold_side = a2rl_carver.current_overtake_side
                     _abort_shadow_side = a2rl_carver.overtake_abort_side(
                         ego_state, opp_states)
-                    _abort_cooldown = 15    # v5.1: shorter cooldown
-                    _hold_steps = 120       # v5.1: longer hold (~15s)
+                    _abort_cooldown = 15
+                    _hold_steps = 120       # ~15s hold
                     _hold_gap_at_entry = nearest_gap
                     current_mode = CarverMode.HOLD
                     print(f"  [OT_ABORT→HOLD] step={step} side={_hold_side} "
@@ -195,25 +195,24 @@ def run_duel(
                 else:
                     current_mode = CarverMode.OVERTAKE
 
-            # --- HOLD mode: RACELINE corridor + speed match, don't fall back ---
+            # --- HOLD mode: RACELINE corridor + speed match ---
             elif _hold_steps > 0:
                 current_mode = CarverMode.HOLD
-                # v5.1: If gap grew too much during HOLD, transition to FOLLOW chase
-                if nearest_gap > _hold_gap_at_entry + 30.0:
+                # v5.2: HOLD→SHADOW (not FOLLOW!) when gap grows too much
+                # SHADOW keeps side-tracking and maintains better gap control
+                if nearest_gap > _hold_gap_at_entry + 25.0:
                     _hold_steps = 0
-                    current_mode = CarverMode.FOLLOW
-                    print(f"  [HOLD→CHASE] step={step} gap={nearest_gap:.1f}")
-                # If overtake window re-opens AND gap is close, go for it
-                # v5.1: only re-engage when NPC yields AND straight ahead
+                    current_mode = CarverMode.SHADOW
+                    print(f"  [HOLD→SHADOW] step={step} gap={nearest_gap:.1f}")
+                # Re-engage OT only on NPC yield + mild curve
                 elif opp_yielding and nearest_gap > 5.0 and nearest_gap < 15.0:
-                    # Verify the next 120m is relatively straight
                     s_ego = ego_state['s'] % track_len
                     s_look = (s_ego + np.linspace(0, 120, 25)) % track_len
                     omega_look = np.interp(
                         s_look, track_handler.s, track_handler.Omega_z,
                         period=track_len)
                     max_curv_ahead = float(np.max(np.abs(omega_look)))
-                    if max_curv_ahead < 0.012:  # only on straight sections
+                    if max_curv_ahead < 0.025:
                         current_mode = CarverMode.OVERTAKE
                         _overtake_locked = True
                         _hold_steps = 0
@@ -222,22 +221,38 @@ def run_duel(
                               f"gap={nearest_gap:.1f} curv={max_curv_ahead:.4f}")
 
             # --- Normal mode selection (ego is behind opp) ---
+            # v5.2: SHADOW is the primary close-range mode (side-track → create opportunity)
+            #   gap > 50  → FOLLOW (pure chase, close the distance)
+            #   gap 15-50 → SHADOW (side-track, prepare overtake)
+            #   gap < 15 + ot_rdy + straight → OVERTAKE
             else:
-                if nearest_gap <= 18.0 and ot_rdy and (_abort_cooldown == 0 or opp_yielding):
-                    # v5: aggressive overtake — go for it
+                # Check upcoming curvature for OT decision
+                s_ego = ego_state['s'] % track_len
+                s_look = (s_ego + np.linspace(0, 150, 30)) % track_len
+                omega_look = np.interp(
+                    s_look, track_handler.s, track_handler.Omega_z,
+                    period=track_len)
+                max_curv_ahead = float(np.max(np.abs(omega_look)))
+                straight_enough = (max_curv_ahead < 0.012)
+
+                # v5.2b: yield loosens curv threshold (0.025) but NOT unlimited
+                curv_ok = straight_enough or (opp_yielding and max_curv_ahead < 0.025)
+                if (nearest_gap <= 15.0 and ot_rdy
+                        and (_abort_cooldown == 0 or opp_yielding)
+                        and curv_ok):
+                    # v5.2: Only OT on straights (or mild curves when NPC yields)
                     current_mode = CarverMode.OVERTAKE
                     _overtake_locked = True
                     _abort_shadow_side = None
                     _hold_side = None
                     print(f"  [OT_START] step={step} gap={nearest_gap:.1f} "
-                          f"yield={opp_yielding}")
-                elif nearest_gap > 30.0:
+                          f"yield={opp_yielding} curv={max_curv_ahead:.4f}")
+                elif nearest_gap > 50.0:
+                    # Far away: pure chase
                     current_mode = CarverMode.FOLLOW
                     _abort_shadow_side = None
-                elif nearest_gap > 18.0:
-                    current_mode = CarverMode.SHADOW
                 else:
-                    # Close but not overtake-ready → shadow (prepare)
+                    # gap 15-50: SHADOW — side-track, prepare overtake
                     current_mode = CarverMode.SHADOW
         else:
             current_mode = mode_map.get(carver_mode, CarverMode.OVERTAKE)
