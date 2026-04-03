@@ -124,6 +124,7 @@ def run_duel(
     _abort_cooldown = 0        # v4.1: steps to wait before re-entering OVERTAKE
     _hold_steps = 0            # v5: HOLD mode counter
     _hold_side = None          # v5: remembered overtake side for HOLD corridor
+    _hold_gap_at_entry = 30.0  # v5.1: gap when entering HOLD
 
     print("=" * 70)
     print(f"1v1 Duel: {sc['name']}")
@@ -149,9 +150,11 @@ def run_duel(
         elif gap < -track_len / 2:
             gap += track_len
         nearest_gap = gap if gap > 0 else 999.0
+        ego_is_ahead = (gap < -3.0)   # v5.1: ego clearly ahead of opp
         opp_V = opp_state.get('V', 0.0)
 
         # 3) Mode selection  (v5: HOLD mode, aggressive overtake, NPC yield aware)
+        #    v5.1 KEY RULE: if ego is ahead → RACELINE, ignore rear car entirely
         if carver_mode == 'auto':
             ot_rdy = a2rl_carver.overtake_ready
             current_mode = CarverMode.RACELINE  # default
@@ -163,41 +166,62 @@ def run_duel(
             if _hold_steps > 0:
                 _hold_steps -= 1
 
-            # --- If locked in OVERTAKE, check completion/abort ---
-            if _overtake_locked:
-                # SUCCESS: ego passed opponent (gap negative = ego ahead)
-                if gap < -3.0:
+            # ========== RULE #0: Ego ahead → RACELINE, done ==========
+            if ego_is_ahead:
+                # We passed the opponent — just go fast, don't look back
+                if _overtake_locked:
                     _overtake_locked = False
                     _abort_shadow_side = None
                     _hold_steps = 0
-                    current_mode = CarverMode.RACELINE
                     print(f"  [OT_SUCCESS] step={step} ego passed opp! gap={gap:.1f}")
-                # ABORT: gap grew too large and opp is still ahead (lost contact)
-                elif gap > 0 and nearest_gap > 30.0:
+                elif _hold_steps > 0:
+                    _hold_steps = 0
+                current_mode = CarverMode.RACELINE
+
+            # --- If locked in OVERTAKE, check completion/abort ---
+            elif _overtake_locked:
+                # ABORT: gap growing — earlier detection (was 30, now 25)
+                if gap > 0 and nearest_gap > 25.0:
                     _overtake_locked = False
                     _hold_side = a2rl_carver.current_overtake_side
                     _abort_shadow_side = a2rl_carver.overtake_abort_side(
                         ego_state, opp_states)
-                    _abort_cooldown = 20
-                    _hold_steps = 60
+                    _abort_cooldown = 15    # v5.1: shorter cooldown
+                    _hold_steps = 120       # v5.1: longer hold (~15s)
+                    _hold_gap_at_entry = nearest_gap
                     current_mode = CarverMode.HOLD
                     print(f"  [OT_ABORT→HOLD] step={step} side={_hold_side} "
                           f"(gap={nearest_gap:.1f})")
                 else:
                     current_mode = CarverMode.OVERTAKE
 
-            # --- HOLD mode: maintain position, don't fall back ---
+            # --- HOLD mode: RACELINE corridor + speed match, don't fall back ---
             elif _hold_steps > 0:
                 current_mode = CarverMode.HOLD
-                # If overtake window re-opens during HOLD AND we have safe distance, go for it
-                if (ot_rdy or opp_yielding) and nearest_gap > 5.0 and nearest_gap < 20.0:
-                    current_mode = CarverMode.OVERTAKE
-                    _overtake_locked = True
+                # v5.1: If gap grew too much during HOLD, transition to FOLLOW chase
+                if nearest_gap > _hold_gap_at_entry + 30.0:
                     _hold_steps = 0
-                    _abort_cooldown = 0
-                    print(f"  [HOLD→OT] step={step} re-engaging overtake! gap={nearest_gap:.1f}")
+                    current_mode = CarverMode.FOLLOW
+                    print(f"  [HOLD→CHASE] step={step} gap={nearest_gap:.1f}")
+                # If overtake window re-opens AND gap is close, go for it
+                # v5.1: only re-engage when NPC yields AND straight ahead
+                elif opp_yielding and nearest_gap > 5.0 and nearest_gap < 15.0:
+                    # Verify the next 120m is relatively straight
+                    s_ego = ego_state['s'] % track_len
+                    s_look = (s_ego + np.linspace(0, 120, 25)) % track_len
+                    omega_look = np.interp(
+                        s_look, track_handler.s, track_handler.Omega_z,
+                        period=track_len)
+                    max_curv_ahead = float(np.max(np.abs(omega_look)))
+                    if max_curv_ahead < 0.012:  # only on straight sections
+                        current_mode = CarverMode.OVERTAKE
+                        _overtake_locked = True
+                        _hold_steps = 0
+                        _abort_cooldown = 0
+                        print(f"  [HOLD→OT] step={step} re-engaging (yield+straight)! "
+                              f"gap={nearest_gap:.1f} curv={max_curv_ahead:.4f}")
 
-            # --- Normal mode selection ---
+            # --- Normal mode selection (ego is behind opp) ---
             else:
                 if nearest_gap <= 18.0 and ot_rdy and (_abort_cooldown == 0 or opp_yielding):
                     # v5: aggressive overtake — go for it
@@ -280,6 +304,7 @@ def run_duel(
             ego_state, trajectory, cfg.assumed_calc_time, track_handler)
 
         # 9) Collision  (v4: s-gap based, box overlap check)
+        #    v5.1: ego ahead → ignore rear car completely (no collision check)
         opp_s_now = opponent.s
         delta_s = ego_state['s'] - opp_s_now
         if delta_s > track_len / 2:
@@ -288,30 +313,31 @@ def run_duel(
             delta_s += track_len
         delta_n = abs(ego_state['n'] - opponent.n)
 
-        # v5: Collision avoidance nudge — if about to collide, push ego sideways
-        if abs(delta_s) < cfg.vehicle_length + 1.0 and delta_n < cfg.vehicle_width + 0.5:
-            # Push ego away from opponent laterally
-            sign = 1.0 if ego_state['n'] >= opponent.n else -1.0
-            needed_gap = cfg.vehicle_width + 0.3
-            current_gap = delta_n
-            nudge = (needed_gap - current_gap) * 0.5  # gradual nudge
-            ego_state['n'] += sign * max(nudge, 0.0)
-            # Re-clip to track bounds
-            s_w = ego_state['s'] % track_len
-            w_l = float(np.interp(s_w, track_handler.s,
-                                  track_handler.w_tr_left, period=track_len))
-            w_r = float(np.interp(s_w, track_handler.s,
-                                  track_handler.w_tr_right, period=track_len))
-            veh_half = cfg.vehicle_width / 2.0
-            ego_state['n'] = float(np.clip(ego_state['n'],
-                                           w_r + veh_half + 0.2,
-                                           w_l - veh_half - 0.2))
-            # Recompute delta_n after nudge
-            delta_n = abs(ego_state['n'] - opponent.n)
+        collision = False
+        if delta_s < 0:
+            # Ego is behind or alongside → collision matters
+            # v5.1: Collision avoidance nudge — if about to collide, push ego sideways
+            if abs(delta_s) < cfg.vehicle_length + 2.0 and delta_n < cfg.vehicle_width + 1.0:
+                sign = 1.0 if ego_state['n'] >= opponent.n else -1.0
+                needed_gap = cfg.vehicle_width + 0.8
+                current_gap = delta_n
+                nudge = (needed_gap - current_gap) * 0.8
+                ego_state['n'] += sign * max(nudge, 0.0)
+                s_w = ego_state['s'] % track_len
+                w_l = float(np.interp(s_w, track_handler.s,
+                                      track_handler.w_tr_left, period=track_len))
+                w_r = float(np.interp(s_w, track_handler.s,
+                                      track_handler.w_tr_right, period=track_len))
+                veh_half = cfg.vehicle_width / 2.0
+                ego_state['n'] = float(np.clip(ego_state['n'],
+                                               w_r + veh_half + 0.2,
+                                               w_l - veh_half - 0.2))
+                delta_n = abs(ego_state['n'] - opponent.n)
 
-        # Collision if longitudinal overlap AND lateral overlap
-        collision = (abs(delta_s) < cfg.vehicle_length and
-                     delta_n < cfg.vehicle_width)
+            collision = (abs(delta_s) < cfg.vehicle_length and
+                         delta_n < cfg.vehicle_width)
+        # else: ego ahead → no collision check, we don't care about rear car
+
         if collision:
             print(f"\n*** COLLISION at step {step}! ds={delta_s:.2f} dn={delta_n:.2f} ***")
 

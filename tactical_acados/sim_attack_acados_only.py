@@ -22,6 +22,7 @@ import time
 import csv
 import numpy as np
 import yaml
+import imageio
 
 # Path setup
 dir_path = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,8 @@ def run_carver_simulation(
         carver_mode='auto',
         shadow_side='left',
         overtake_side=None,
+        save_gif=False,
+        gif_name=None,
 ):
     """Run locked-mode carver simulation with full data recording."""
 
@@ -84,6 +87,10 @@ def run_carver_simulation(
 
     # Carver with global_planner (needed for RACELINE mode)
     a2rl_carver = A2RLObstacleCarver(track_handler, cfg, global_planner=global_planner)
+    
+    # Override carver internal defaults from global config
+    a2rl_carver.follow_gap_target = cfg.follow_gap_default
+    a2rl_carver.follow_funnel_half = cfg.follow_funnel_half
 
     ego_state = create_initial_state(
         track_handler,
@@ -125,6 +132,7 @@ def run_carver_simulation(
 
     # Logging
     log_rows = []
+    frames = []
     track_len = track_handler.s[-1]
     _overtake_locked = False   # v4: mode latch
     _abort_shadow_side = None  # v4.1: when overtake aborts, remember shadow side
@@ -229,6 +237,11 @@ def run_carver_simulation(
             overtake_side=_overtake_side,
             prev_trajectory=planner._prev_trajectory,
         )
+        
+        # Aggressive follow: remove speed cap to allow closing the gap quickly
+        from a2rl_obstacle_carver import CarverMode
+        if current_mode == CarverMode.FOLLOW and cfg.follow_remove_speed_cap:
+            guidance.speed_cap = a2rl_carver.V_max
 
         # 5) Plan
         trajectory = planner.plan(ego_state, guidance)
@@ -247,6 +260,12 @@ def run_carver_simulation(
                        opponents=opp_predictions,
                        tactical_info=tactical_info,
                        guidance=guidance)
+            if save_gif:
+                # Capture frame
+                viz.fig.canvas.draw()
+                image = np.frombuffer(viz.fig.canvas.tostring_rgb(), dtype='uint8')
+                image = image.reshape(viz.fig.canvas.get_width_height()[::-1] + (3,))
+                frames.append(image)
 
         # 7) Move opponents
         for opp in opponents:
@@ -323,6 +342,14 @@ def run_carver_simulation(
             writer.writerows(log_rows)
         print(f"Log saved: {csv_path}")
 
+    # Export GIF
+    if save_gif and frames:
+        if gif_name is None:
+            gif_name = f"sim_{carver_mode}_{scenario_name}.gif"
+        gif_path = os.path.join(dir_path, gif_name)
+        imageio.mimsave(gif_path, frames, fps=int(1.0/cfg.assumed_calc_time))
+        print(f"GIF saved: {gif_path}")
+
     return log_rows
 
 
@@ -331,7 +358,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Carver-Only Simulation')
     parser.add_argument('--scenario', type=str, default='scenario_c',
                         help='scenario_a, scenario_b, scenario_c')
-    parser.add_argument('--mode', type=str, default='auto',
+    parser.add_argument('--mode', type=str, default='follow',
                         choices=['auto', 'follow', 'shadow', 'overtake', 'raceline'],
                         help='Locked carver mode')
     parser.add_argument('--shadow-side', type=str, default='left',
@@ -342,6 +369,10 @@ if __name__ == '__main__':
                         help='Maximum simulation steps')
     parser.add_argument('--no-viz', action='store_true',
                         help='Disable visualization')
+    parser.add_argument('--save-gif', action='store_true',
+                        help='Save simulation as GIF')
+    parser.add_argument('--gif-name', type=str, default=None,
+                        help='Output GIF filename')
     args = parser.parse_args()
 
     run_carver_simulation(
@@ -351,4 +382,6 @@ if __name__ == '__main__':
         carver_mode=args.mode,
         shadow_side=args.shadow_side,
         overtake_side=args.overtake_side,
+        save_gif=args.save_gif,
+        gif_name=args.gif_name,
     )

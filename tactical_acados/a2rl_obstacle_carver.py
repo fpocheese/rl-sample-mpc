@@ -186,31 +186,47 @@ class A2RLObstacleCarver:
                 w_left, w_right, w_l_base, w_r_base,
                 max_v_node, side, target_opp_id)
         elif mode == CarverMode.HOLD:
-            # v5 HOLD: Keep current overtake corridor, PID to maintain s-gap
-            # Key: NEVER slow down substantially — maintain position alongside opp
+            # v5.1 HOLD: maintain relative gap, don't fall behind
+            # Strategy: when gap is large → RACELINE (go fast, close gap)
+            #           when gap is small → SHADOW (prepare for re-engagement)
             side = overtake_side if overtake_side else self._overtake_side
+            if side is None:
+                side = self._decide_shadow_side(ego_state, opp_states)
+            self._shadow_side = side
             self._overtake_side = side
-            # Reuse overtake corridor shaping (keeps the passing lane open)
-            speed_cap, speed_scale = self._mode_overtake(
-                ego_state, opp_states, s_arr, s_wrapped, t_arr,
-                w_left, w_right, w_l_base, w_r_base,
-                max_v_node, side)
-            # Override speed: maintain current gap, don't fall behind
+
             target = self._find_target(ego_state, opp_states, target_opp_id)
             if target is not None:
                 leader_V = target.get('V', 30.0)
                 gap_current = self._signed_gap(target['s'], ego_state['s'])
-                # PID target = current gap (clamped to reasonable range)
-                hold_gap_target = float(np.clip(gap_current, 3.0, 15.0))
+
+                # v5.1 HOLD always uses RACELINE corridor
+                # This gives ego the fastest possible path through corners
+                # When gap is small, we still stay on raceline but with
+                # speed matching — the normal OT_START logic will re-engage
+                # when conditions are right
+                speed_cap, speed_scale = self._mode_raceline(
+                    ego_state, s_arr, s_wrapped,
+                    w_left, w_right, w_l_base, w_r_base, N_stages)
+
+                # Override speed: aggressively close gap back to target
+                # HOLD must NOT let gap grow — use high floor
                 speed_cmd = self._follow_pid.compute(
-                    hold_gap_target, gap_current, leader_V)
+                    self.follow_gap_target, gap_current, leader_V)
+                # Floor: at minimum match leader; if gap > target, add pursuit boost
+                gap_excess = max(gap_current - self.follow_gap_target, 0.0)
+                pursuit_boost = min(gap_excess * 0.3, 10.0)  # up to +10 m/s
+                speed_floor = leader_V + pursuit_boost
                 speed_cap = float(np.clip(speed_cmd,
-                                          leader_V * 0.99,  # NEVER slow below leader
+                                          speed_floor,
                                           self.V_max))
-            # Also check if overtake window re-opened
-            if target is not None:
+                # Check if overtake window re-opened
                 self._overtake_ready = self._check_overtake_window(
                     ego_state, target, side)
+            else:
+                speed_cap, speed_scale = self._mode_raceline(
+                    ego_state, s_arr, s_wrapped,
+                    w_left, w_right, w_l_base, w_r_base, N_stages)
         elif mode == CarverMode.RACELINE:
             speed_cap, speed_scale = self._mode_raceline(
                 ego_state, s_arr, s_wrapped,
@@ -317,6 +333,11 @@ class A2RLObstacleCarver:
                 # so excl_n = 2.0 → actual gap ≈ 3.5m from opp center
                 if ds_abs < 15.0:
                     excl_n = max(excl_n, 2.0)
+                # v5.1: extra clearance when NPC is yielding — its position
+                # is transitioning laterally, prediction may lag behind actual
+                opp_tactic = opp.get('tactic', '')
+                if opp_tactic == 'yield' and ds_abs < 20.0:
+                    excl_n = max(excl_n, 2.8)  # wider zone during yield
                 opp_n = use_opp_n
 
                 if ds_abs > self.fade_start:
