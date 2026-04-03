@@ -17,11 +17,11 @@ import csv
 import numpy as np
 import yaml
 
-# Path setup — reuse tactical_acados + src modules
+# Path setup — self-contained: all modules are local to dual_combat/
+# Only src/ (base track/planner/gg libs) is shared from project root.
 dir_path = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(dir_path, '..')
 sys.path.insert(0, os.path.join(project_root, 'src'))
-sys.path.insert(0, os.path.join(project_root, 'tactical_acados'))
 sys.path.insert(0, dir_path)
 
 from config import TacticalConfig
