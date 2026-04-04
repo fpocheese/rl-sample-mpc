@@ -50,9 +50,11 @@ class OpponentVehicle:
         self.z = 0.0
 
         # Tactical state
-        self.tactic = 'follow'  # 'follow', 'defend_left', 'defend_right'
+        self.tactic = 'follow'  # 'follow', 'defend_left', 'defend_right', 'yield', 'trailing'
         self.target_n_offset = 0.0
         self._tactic_hold_steps = 0  # v5.2: hysteresis cooldown for defend
+        self._trailing = False        # v6: ego has passed us, we trail behind
+        self._trailing_gap_target = 30.0  # desired gap when trailing [m]
 
         # Update Cartesian
         self._update_cartesian()
@@ -86,6 +88,55 @@ class OpponentVehicle:
 
         new_V = float(np.interp(dt, t_rl, raceline['V'])) * self.speed_scale
         new_V = max(new_V, 5.0)
+
+        # v6: Trailing speed control — if ego has passed us, slow down to maintain gap
+        if self._trailing and ego_state is not None:
+            delta_s_ego = ego_state['s'] - new_s
+            if delta_s_ego < -track_len / 2:
+                delta_s_ego += track_len
+            elif delta_s_ego > track_len / 2:
+                delta_s_ego -= track_len
+            # delta_s_ego > 0 means ego is ahead
+            if delta_s_ego > 0:
+                gap = delta_s_ego
+                gap_error = self._trailing_gap_target - gap  # positive = too close
+                # Simple proportional speed reduction
+                ego_V = ego_state.get('V', new_V)
+                if gap < self._trailing_gap_target:
+                    # Too close — slow down more aggressively
+                    speed_factor = max(0.5, 1.0 - gap_error * 0.05)
+                    new_V = min(new_V, ego_V * speed_factor)
+                elif gap < self._trailing_gap_target + 10:
+                    # Near target gap — match ego speed
+                    new_V = min(new_V, ego_V)
+                # If gap > target+10, use normal speed (will naturally close)
+                new_V = max(new_V, 5.0)
+
+        # v8: 反追尾 — NPC在ego后方且距离<8m时减速
+        if not self._trailing and ego_state is not None:
+            delta_s_ego = ego_state['s'] - new_s
+            if delta_s_ego < -track_len / 2:
+                delta_s_ego += track_len
+            elif delta_s_ego > track_len / 2:
+                delta_s_ego -= track_len
+            # delta_s_ego < 0 means ego is behind us (we are ahead)
+            # delta_s_ego > 0 means ego is ahead
+            # NPC behind ego: delta_s_ego < 0 means WE are ahead → no
+            # Actually: if delta_s_ego < 0, NPC is AHEAD. We want NPC BEHIND.
+            # NPC behind ego → ego_s > new_s → delta_s_ego > 0
+            # Wait — we want: NPC behind ego = NPC's s < ego's s → delta_s_ego > 0
+            # That case is handled by trailing above.
+            # For anti-rear-collision: NPC AHEAD of ego but ego is catching up fast
+            # Actually the user wants: "对手应该避免从后方撞击ego"
+            # Meaning: if NPC is BEHIND ego (delta_s_ego > 0) and gap < 5m
+            # But this contradicts trailing... The scenario is:
+            # NPC not yet in trailing mode but is close behind ego
+            if delta_s_ego > 0 and delta_s_ego < 8.0:
+                # NPC is behind ego and very close — reduce speed to avoid rear collision
+                ego_V = ego_state.get('V', new_V)
+                slow_factor = max(0.6, 1.0 - (8.0 - delta_s_ego) * 0.06)
+                new_V = min(new_V, ego_V * slow_factor)
+                new_V = max(new_V, 5.0)
 
         # Raceline lateral offset
         rl_n = float(np.interp(new_s, raceline['s'] % track_len, raceline['n'],
@@ -134,23 +185,40 @@ class OpponentVehicle:
     def _update_tactic(self, ego_state: dict, new_s: float):
         """Heuristic tactic based on ego position + race rules.
 
-        Race rule: if a corner is ahead and ego is within 15m behind,
-        the front car must yield 3m toward track center (give the apex).
-        Once ego passes us, resume raceline.
+        Race rules:
+        1. If a corner is ahead and ego is within 15m behind,
+           the front car must yield 3m toward track center (give the apex).
+        2. Once ego passes us, enter trailing mode — follow ego at 30m+ gap,
+           don't blindly raceline back into ego's path.
         """
         track_len = self.track_handler.s[-1]
-        # delta_s < 0 means ego is behind us
+        # delta_s > 0 means ego is ahead of us
         delta_s = ego_state['s'] - new_s
         if delta_s > track_len / 2:
             delta_s -= track_len
         elif delta_s < -track_len / 2:
             delta_s += track_len
 
+        # ============================================================
+        # RULE: If ego is ahead by > 5m → enter trailing mode
+        # ============================================================
+        if delta_s > 5.0:
+            if not self._trailing:
+                self._trailing = True
+            self.tactic = 'trailing'
+            self.target_n_offset = 0.0  # follow raceline, just at lower speed
+            return
+
+        # If ego comes back behind us (e.g. we're in different part of track)
+        if delta_s < -10.0 and self._trailing:
+            self._trailing = False
+
         # --- If currently yielding, check if ego has passed us ---
         if self.tactic == 'yield':
             if delta_s > 2.0:
-                # Ego is now ahead — resume raceline
-                self.tactic = 'follow'
+                # Ego is now ahead — enter trailing mode
+                self._trailing = True
+                self.tactic = 'trailing'
                 self.target_n_offset = 0.0
             return  # keep yielding until ego passes
 
@@ -165,20 +233,30 @@ class OpponentVehicle:
             max_curv = float(np.max(np.abs(omega_vals)))
 
             if max_curv > 0.015:
-                # Corner ahead — yield: shift 3m toward track center
-                # Track center n ≈ (w_left + w_right) / 2
-                w_l = float(np.interp(s_w, self.track_handler.s,
-                                      self.track_handler.w_tr_left,
-                                      period=track_len))
-                w_r = float(np.interp(s_w, self.track_handler.s,
-                                      self.track_handler.w_tr_right,
-                                      period=track_len))
-                center_n = 0.5 * (w_l + w_r)
-                # direction: move from current n toward center
-                if self.n < center_n:
-                    self.target_n_offset = 3.0   # shift left (toward positive n)
+                # Corner ahead — yield: shift 3m toward INNER LINE
+                # v8: 用弯道曲率符号确定内线方向
+                # Omega_z > 0 → 左弯 → 内侧 = right (负n方向)
+                # Omega_z < 0 → 右弯 → 内侧 = left  (正n方向)
+                avg_curv = float(np.mean(omega_vals))
+                if avg_curv > 0.005:
+                    # 左弯 → 内线在右侧 (负n)
+                    self.target_n_offset = -3.0
+                elif avg_curv < -0.005:
+                    # 右弯 → 内线在左侧 (正n)
+                    self.target_n_offset = 3.0
                 else:
-                    self.target_n_offset = -3.0  # shift right (toward negative n)
+                    # 近似直道 → 向中心偏移 (fallback)
+                    w_l = float(np.interp(s_w, self.track_handler.s,
+                                          self.track_handler.w_tr_left,
+                                          period=track_len))
+                    w_r = float(np.interp(s_w, self.track_handler.s,
+                                          self.track_handler.w_tr_right,
+                                          period=track_len))
+                    center_n = 0.5 * (w_l + w_r)
+                    if self.n < center_n:
+                        self.target_n_offset = 3.0
+                    else:
+                        self.target_n_offset = -3.0
                 self.tactic = 'yield'
                 return
 

@@ -31,6 +31,8 @@ class OpponentState:
     pred_n: Optional[np.ndarray] = None
     pred_x: Optional[np.ndarray] = None
     pred_y: Optional[np.ndarray] = None
+    # v6: NPC tactic hint for policy intelligence
+    tactic: str = 'follow'
 
 
 @dataclass
@@ -50,6 +52,7 @@ class TacticalObservation:
     w_right: float = -5.0                     # right track width at ego s
     dist_to_next_apex: float = 100.0          # approximate distance to next turn
     upcoming_max_curvature: float = 0.0       # max curvature in next 200m
+    upcoming_curvature_sign: float = 0.0      # sign of dominant curvature: >0 left turn, <0 right turn
 
     # Opponent information
     opponents: List[OpponentState] = field(default_factory=list)
@@ -144,8 +147,12 @@ def build_observation(
                            period=s_track_len)
     upcoming_max_curv = float(np.max(curvatures))
 
-    # Find next apex (max curvature point)
-    apex_idx = np.argmax(curvatures)
+    # Signed curvature at the apex → tells us curve direction
+    # Omega_z > 0 → left turn (inner side = right), Omega_z < 0 → right turn (inner = left)
+    signed_curvatures = np.interp(s_lookahead, track_handler.s, track_handler.Omega_z,
+                                  period=s_track_len)
+    apex_idx = np.argmax(np.abs(signed_curvatures))
+    upcoming_curv_sign = float(signed_curvatures[apex_idx])
     dist_to_apex = float(apex_idx * 4.0)  # 200m / 50 points = 4m per point
 
     ego_kappa = float(np.interp(s_ego, track_handler.s, track_handler.Omega_z, period=s_track_len))
@@ -180,6 +187,7 @@ def build_observation(
             pred_n=opp.get('pred_n'),
             pred_x=opp.get('pred_x'),
             pred_y=opp.get('pred_y'),
+            tactic=opp.get('tactic', 'follow'),
         )
         opp_states.append(opp_state)
 
@@ -198,6 +206,7 @@ def build_observation(
         w_right=w_right,
         dist_to_next_apex=dist_to_apex,
         upcoming_max_curvature=upcoming_max_curv,
+        upcoming_curvature_sign=upcoming_curv_sign,
         opponents=opp_states,
         p2p_available=bool(p2p_state[0]),
         p2p_active=bool(p2p_state[1]),

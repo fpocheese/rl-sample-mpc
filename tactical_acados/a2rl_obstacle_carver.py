@@ -88,7 +88,7 @@ class A2RLObstacleCarver:
         self.draft_min_width    = 7.0
         self.fade_start         = 30.0    # v5: start hinting earlier (was 20)
         self.fade_end           = 15.0    # v5: (was 12)
-        self.hint_intensity     = 0.3     # v5: stronger hint (was 0.2)
+        self.hint_intensity     = 0.5     # v8: wider hint side (was 0.3)
 
         # FOLLOW (draft: directly behind)
         self.follow_gap_target  = 10.0    # v5: shortened from 8 → 12 (was too close for PID)
@@ -187,8 +187,7 @@ class A2RLObstacleCarver:
                 max_v_node, side, target_opp_id)
         elif mode == CarverMode.HOLD:
             # v5.1 HOLD: maintain relative gap, don't fall behind
-            # Strategy: when gap is large → RACELINE (go fast, close gap)
-            #           when gap is small → SHADOW (prepare for re-engagement)
+            # v6: add opponent-avoidance carving on top of raceline corridor
             side = overtake_side if overtake_side else self._overtake_side
             if side is None:
                 side = self._decide_shadow_side(ego_state, opp_states)
@@ -200,26 +199,51 @@ class A2RLObstacleCarver:
                 leader_V = target.get('V', 30.0)
                 gap_current = self._signed_gap(target['s'], ego_state['s'])
 
-                # v5.1 HOLD always uses RACELINE corridor
-                # This gives ego the fastest possible path through corners
-                # When gap is small, we still stay on raceline but with
-                # speed matching — the normal OT_START logic will re-engage
-                # when conditions are right
+                # v5.1 HOLD always uses RACELINE corridor base
                 speed_cap, speed_scale = self._mode_raceline(
                     ego_state, s_arr, s_wrapped,
                     w_left, w_right, w_l_base, w_r_base, N_stages)
 
+                # v6: overlay opponent avoidance on ALL opponents
+                # This prevents the raceline corridor from driving
+                # straight through any opponent (critical in multi-car)
+                # v8: 使用单侧排斥而非居中漏斗, 更安全
+                for opp in opp_states:
+                    opp_s_pred, opp_n_pred = self._predict_opp(
+                        opp, t_arr, max_v_node)
+                    # 确定 ego 相对于 opp 的侧向: ego 在哪侧就把 opp 推向另一侧
+                    ego_n_now = ego_state.get('n', 0.0)
+                    opp_n_now = opp.get('n', 0.0)
+                    ego_is_left = (ego_n_now > opp_n_now)
+                    for i in range(max_v_node):
+                        ds_raw = self._signed_gap(opp_s_pred[i], s_arr[i])
+                        if ds_raw < -4.0:
+                            continue
+                        ds_abs = abs(ds_raw)
+                        if ds_abs >= self.safety_s:
+                            continue
+                        fade = self._cosine_fade(ds_abs, self.safety_s)
+                        fade *= self._startup_ramp(i)
+                        # v8: 排斥宽度 = opp_half_w + clearance, 最小3.5m
+                        excl = (self.opp_half_w + self.opp_clearance) * fade
+                        if ds_abs < 15.0:
+                            excl = max(excl, 3.5)
+                        if ego_is_left:
+                            # ego在左, 把右边界推到opp右侧
+                            new_r = opp_n_pred[i] + excl
+                            w_right[i] = max(w_right[i], new_r)
+                        else:
+                            # ego在右, 把左边界推到opp左侧
+                            new_l = opp_n_pred[i] - excl
+                            w_left[i] = min(w_left[i], new_l)
+
                 # Override speed: aggressively close gap back to target
-                # HOLD must NOT let gap grow — use high floor
+                # v8: HOLD 不卡速度上限, PID 输出作 speed_scale 建议
                 speed_cmd = self._follow_pid.compute(
                     self.follow_gap_target, gap_current, leader_V)
-                # Floor: at minimum match leader; if gap > target, add pursuit boost
-                gap_excess = max(gap_current - self.follow_gap_target, 0.0)
-                pursuit_boost = min(gap_excess * 0.3, 10.0)  # up to +10 m/s
-                speed_floor = leader_V + pursuit_boost
-                speed_cap = float(np.clip(speed_cmd,
-                                          speed_floor,
-                                          self.V_max))
+                speed_scale = float(np.clip(speed_cmd / max(self.V_max, 1.0),
+                                            0.5, 1.0))
+                speed_cap = self.V_max
                 # Check if overtake window re-opened
                 self._overtake_ready = self._check_overtake_window(
                     ego_state, target, side)
@@ -239,6 +263,10 @@ class A2RLObstacleCarver:
                 ego_state, opp_states, s_arr, s_wrapped, t_arr,
                 w_left, w_right, w_l_base, w_r_base,
                 max_v_node, side)
+
+        # v8: 公共安全层 — 所有模式结束后对全部对手做安全排斥
+        self._apply_all_opp_safety(ego_state, opp_states, s_arr, t_arr,
+                                    w_left, w_right, max_v_node)
 
         w_left, w_right = self._smooth_boundaries(w_left, w_right, N_stages)
         w_left, w_right = self._ensure_feasibility(
@@ -332,12 +360,12 @@ class A2RLObstacleCarver:
                 # Note: ACADOS adds veh_width/2 + safety_dist (~1.5m) on top
                 # so excl_n = 2.0 → actual gap ≈ 3.5m from opp center
                 if ds_abs < 15.0:
-                    excl_n = max(excl_n, 2.0)
+                    excl_n = max(excl_n, 3.5)   # v8: wider (was 3.0)
                 # v5.1: extra clearance when NPC is yielding — its position
                 # is transitioning laterally, prediction may lag behind actual
                 opp_tactic = opp.get('tactic', '')
                 if opp_tactic == 'yield' and ds_abs < 20.0:
-                    excl_n = max(excl_n, 2.8)  # wider zone during yield
+                    excl_n = max(excl_n, 3.5)  # v7: wider zone during yield
                 opp_n = use_opp_n
 
                 if ds_abs > self.fade_start:
@@ -353,18 +381,22 @@ class A2RLObstacleCarver:
                     blend = 0.0
                     min_w_cur = self.min_corridor
 
+                # v8: hint 侧最小展开 — 即使 blend=0，也保证 hint_blend >= 0.25
+                # 原来 blend=0 时 hint 侧完全不展开，导致超车走廊太窄
+                hint_blend = max(blend, 0.25)
+
                 if chosen_side == 'left':
                     new_r = opp_n + excl_n
                     if new_r > w_right[i]:
                         w_right[i] = min(new_r, w_left[i] - min_w_cur)
-                    new_l = opp_n - (excl_n * self.hint_intensity * blend)
+                    new_l = opp_n - (excl_n * self.hint_intensity * hint_blend)
                     if new_l < w_left[i]:
                         w_left[i] = new_l
                 else:
                     new_l = opp_n - excl_n
                     if new_l < w_left[i]:
                         w_left[i] = max(new_l, w_right[i] + min_w_cur)
-                    new_r = opp_n + (excl_n * self.hint_intensity * blend)
+                    new_r = opp_n + (excl_n * self.hint_intensity * hint_blend)
                     if new_r > w_right[i]:
                         w_right[i] = new_r
 
@@ -388,9 +420,11 @@ class A2RLObstacleCarver:
         if gap_current > 0:
             speed_cmd = self._follow_pid.compute(
                 self.follow_gap_target, gap_current, leader_V)
-            speed_cap = float(np.clip(speed_cmd,
-                                      getattr(self.cfg, 'V_min', 5.0),
-                                      self.V_max))
+            # v8: PID 输出作 speed_scale 建议，但 speed_cap 不限速
+            # 没有速度就没有超车！
+            speed_scale = float(np.clip(speed_cmd / max(self.V_max, 1.0),
+                                        0.5, 1.0))
+            speed_cap = self.V_max
         else:
             speed_cap = self.V_max
 
@@ -431,9 +465,10 @@ class A2RLObstacleCarver:
         if gap_current > 0:
             speed_cmd = self._shadow_pid.compute(
                 self.shadow_gap_target, gap_current, leader_V)
-            speed_cap = float(np.clip(speed_cmd,
-                                      getattr(self.cfg, 'V_min', 5.0),
-                                      self.V_max))
+            # v8: PID 输出作 speed_scale 建议，但 speed_cap 不限速
+            speed_scale = float(np.clip(speed_cmd / max(self.V_max, 1.0),
+                                        0.5, 1.0))
+            speed_cap = self.V_max
         else:
             speed_cap = self.V_max
 
@@ -460,8 +495,25 @@ class A2RLObstacleCarver:
             w_left[i] = min(w_left[i], tgt_l)
             w_right[i] = max(w_right[i], tgt_r)
 
+            # v8: 安全约束 — SHADOW 近距离时强制排斥对手
+            # 基于 ego 实际位置(而非 shadow_side)确定排斥方向
+            if ds_abs < 15.0:
+                safety_excl = max((self.opp_half_w + self.opp_clearance) * fade, 3.5)
+                ego_n_now = ego_state.get('n', 0.0)
+                if ego_n_now > opp_n_pred:
+                    # ego 在 opp 左侧(上方), 右边界推到 opp 右侧
+                    w_right[i] = max(w_right[i], opp_n_pred + safety_excl)
+                else:
+                    # ego 在 opp 右侧(下方), 左边界推到 opp 左侧
+                    w_left[i] = min(w_left[i], opp_n_pred - safety_excl)
+
         self._overtake_ready = self._check_overtake_window(
             ego_state, target, shadow_side)
+
+        # v8: 对所有对手(不仅target)做安全排斥
+        # 防止 SHADOW 追 target 时穿过其他对手
+        self._apply_all_opp_safety(ego_state, opp_states, s_arr, t_arr,
+                                    w_left, w_right, max_v_node)
 
         return speed_cap, speed_scale
 
@@ -658,6 +710,33 @@ class A2RLObstacleCarver:
             w_left[:n] = w_l_sm[:n]
             w_right[:n] = w_r_sm[:n]
         return w_left, w_right
+
+    def _apply_all_opp_safety(self, ego_state, opp_states, s_arr, t_arr,
+                               w_left, w_right, max_v_node):
+        """v8: 对所有对手做安全排斥 — 防止任何模式下穿过非目标对手.
+        基于 ego 当前位置确定排斥方向, 排斥量 3.5m 最小."""
+        ego_n = ego_state.get('n', 0.0)
+        for opp in opp_states:
+            opp_s_pred, opp_n_pred = self._predict_opp(opp, t_arr, max_v_node)
+            opp_n_now = opp.get('n', 0.0)
+            ego_is_left = (ego_n > opp_n_now)
+            for i in range(max_v_node):
+                ds_raw = self._signed_gap(opp_s_pred[i], s_arr[i])
+                if ds_raw < -10.0:  # 放宽: 也保护已超过的对手
+                    continue
+                ds_abs = abs(ds_raw)
+                if ds_abs >= 25.0:
+                    continue
+                fade = self._cosine_fade(ds_abs, 25.0)
+                excl = max((self.opp_half_w + self.opp_clearance) * fade, 3.5)
+                if ego_is_left:
+                    new_r = opp_n_pred[i] + excl
+                    if new_r > w_right[i]:
+                        w_right[i] = new_r
+                else:
+                    new_l = opp_n_pred[i] - excl
+                    if new_l < w_left[i]:
+                        w_left[i] = new_l
 
     def _ensure_feasibility(self, w_left, w_right, w_l_base, w_r_base,
                             N_stages):
