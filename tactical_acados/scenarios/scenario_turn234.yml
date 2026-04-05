@@ -1,0 +1,31 @@
+# Scenario: Turn 2-3-4 Overtaking (Paper Figure)
+# LOCAL SEGMENT ONLY: s ∈ [350, 1100]
+
+scenario:
+  name: "Paper Turn 2-3-4 Overtake"
+  track_name: "yas_user_smoothed"
+  vehicle_name: "eav25_car"
+  raceline_name: "yasnorth_3d_rl_as_ref_eav25_car_gg_0.1"
+  s_start: 350.0
+  s_end: 1100.0
+
+ego:
+  start_s: 370.0
+  start_n: 0.0
+  start_V: 45.0
+  start_chi: 0.0
+  start_ax: 0.0
+  start_ay: 0.0
+
+opponents:
+  - id: 1
+    start_s: 380.0    # ~10m ahead (like T678 success)
+    start_n: 0.0
+    start_V: 38.0
+    speed_scale: 0.80
+
+planner:
+  optimization_horizon_m: 300.0
+  gg_margin: 0.1
+  safety_distance: 0.5
+  assumed_calc_time: 0.125

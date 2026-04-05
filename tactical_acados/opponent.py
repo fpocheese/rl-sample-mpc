@@ -56,6 +56,14 @@ class OpponentVehicle:
         self._trailing = False        # v6: ego has passed us, we trail behind
         self._trailing_gap_target = 30.0  # desired gap when trailing [m]
 
+        # ---- Paper: aggressive defense with one-move rule ----
+        self._block_dir: str = 'none'          # 'left', 'right', 'none'
+        self._block_dir_changes: int = 0       # how many times block direction changed
+        self._block_dir_locked: bool = False   # True after 1 switch → cannot change again
+        self._block_offset: float = 3.5        # aggressive block offset [m]
+        self._defend_engage_dist: float = 25.0 # start blocking when ego within this gap
+        self._alongside_threshold: float = 5.0 # ego alongside if |delta_s| < this
+
         # Update Cartesian
         self._update_cartesian()
 
@@ -150,8 +158,11 @@ class OpponentVehicle:
 
         # Smooth lateral transition
         # v5: yield faster when yielding
+        # Paper: defend faster too for aggressive blocking
         if self.tactic == 'yield':
-            alpha_n = min(dt * 4.0, 1.0)  # faster lateral move during yield
+            alpha_n = min(dt * 4.0, 1.0)  # fast lateral move during yield
+        elif self.tactic in ('defend_left', 'defend_right'):
+            alpha_n = min(dt * 3.5, 1.0)  # aggressive blocking lateral speed
         else:
             alpha_n = min(dt * 2.0, 1.0)  # normal smooth factor
         new_n = self.n + alpha_n * (target_n - self.n)
@@ -183,16 +194,17 @@ class OpponentVehicle:
         self._update_cartesian()
 
     def _update_tactic(self, ego_state: dict, new_s: float):
-        """Heuristic tactic based on ego position + race rules.
+        """Aggressive defensive tactic (Paper version).
 
         Race rules:
-        1. If a corner is ahead and ego is within 15m behind,
-           the front car must yield 3m toward track center (give the apex).
-        2. Once ego passes us, enter trailing mode — follow ego at 30m+ gap,
-           don't blindly raceline back into ego's path.
+        1. Defender may choose a blocking line when attacker approaches.
+        2. Defender may change blocking direction ONCE (one reactive move).
+        3. After one direction change, defender is locked — no S-line blocking.
+        4. If attacker reaches alongside (within vehicle_length), defender
+           must yield the racing line (give the corner).
+        5. Once attacker passes, enter trailing mode.
         """
         track_len = self.track_handler.s[-1]
-        # delta_s > 0 means ego is ahead of us
         delta_s = ego_state['s'] - new_s
         if delta_s > track_len / 2:
             delta_s -= track_len
@@ -200,94 +212,100 @@ class OpponentVehicle:
             delta_s += track_len
 
         # ============================================================
-        # RULE: If ego is ahead by > 5m → enter trailing mode
+        # RULE: Ego clearly ahead → trailing mode
         # ============================================================
         if delta_s > 5.0:
             if not self._trailing:
                 self._trailing = True
             self.tactic = 'trailing'
-            self.target_n_offset = 0.0  # follow raceline, just at lower speed
+            self.target_n_offset = 0.0
             return
 
-        # If ego comes back behind us (e.g. we're in different part of track)
-        if delta_s < -10.0 and self._trailing:
+        # Reset trailing if ego falls back behind
+        if delta_s < -15.0 and self._trailing:
             self._trailing = False
+            # Reset block direction tracking for new encounter
+            self._block_dir = 'none'
+            self._block_dir_changes = 0
+            self._block_dir_locked = False
 
-        # --- If currently yielding, check if ego has passed us ---
+        # ============================================================
+        # Already yielding → keep yielding until ego passes
+        # ============================================================
         if self.tactic == 'yield':
             if delta_s > 2.0:
-                # Ego is now ahead — enter trailing mode
                 self._trailing = True
                 self.tactic = 'trailing'
                 self.target_n_offset = 0.0
-            return  # keep yielding until ego passes
+            return
 
-        # --- Check yield condition: ego behind within 15m + corner ahead ---
-        if delta_s < 0 and abs(delta_s) <= 15.0:
-            # Sample Omega_z over next 50m to detect upcoming corner
+        # ============================================================
+        # Ego alongside → MUST yield (race rules)
+        # ============================================================
+        if delta_s > -self._alongside_threshold and delta_s <= 5.0:
+            # Ego is alongside or just behind but overlapping
+            # Yield: move toward inner line of upcoming corner
             s_w = new_s % track_len
-            s_look = (s_w + np.linspace(0.0, 50.0, 15)) % track_len
+            s_look = (s_w + np.linspace(0.0, 80.0, 20)) % track_len
             omega_vals = np.interp(s_look, self.track_handler.s,
                                    self.track_handler.Omega_z,
                                    period=track_len)
-            max_curv = float(np.max(np.abs(omega_vals)))
+            avg_curv = float(np.mean(omega_vals))
+            if avg_curv > 0.003:
+                # Left turn → yield to right (inner)
+                self.target_n_offset = -4.0
+            elif avg_curv < -0.003:
+                # Right turn → yield to left (inner)
+                self.target_n_offset = 4.0
+            else:
+                # Straight → yield toward center
+                delta_n = ego_state['n'] - self.n
+                self.target_n_offset = -3.0 if delta_n > 0 else 3.0
+            self.tactic = 'yield'
+            return
 
-            if max_curv > 0.015:
-                # Corner ahead — yield: shift 3m toward INNER LINE
-                # v8: 用弯道曲率符号确定内线方向
-                # Omega_z > 0 → 左弯 → 内侧 = right (负n方向)
-                # Omega_z < 0 → 右弯 → 内侧 = left  (正n方向)
-                avg_curv = float(np.mean(omega_vals))
-                if avg_curv > 0.005:
-                    # 左弯 → 内线在右侧 (负n)
-                    self.target_n_offset = -3.0
-                elif avg_curv < -0.005:
-                    # 右弯 → 内线在左侧 (正n)
-                    self.target_n_offset = 3.0
-                else:
-                    # 近似直道 → 向中心偏移 (fallback)
-                    w_l = float(np.interp(s_w, self.track_handler.s,
-                                          self.track_handler.w_tr_left,
-                                          period=track_len))
-                    w_r = float(np.interp(s_w, self.track_handler.s,
-                                          self.track_handler.w_tr_right,
-                                          period=track_len))
-                    center_n = 0.5 * (w_l + w_r)
-                    if self.n < center_n:
-                        self.target_n_offset = 3.0
-                    else:
-                        self.target_n_offset = -3.0
-                self.tactic = 'yield'
+        # ============================================================
+        # Ego behind within engage distance → AGGRESSIVE BLOCK
+        # ============================================================
+        if delta_s < 0 and abs(delta_s) < self._defend_engage_dist:
+            delta_n = ego_state['n'] - self.n
+            # Determine which side ego is attacking from
+            if abs(delta_n) < 1.0:
+                # Ego directly behind — keep current block or default
+                if self.tactic in ('defend_left', 'defend_right'):
+                    return
+                # Default: block toward raceline outside
+                ego_side = 'left' if delta_n >= 0 else 'right'
+            else:
+                ego_side = 'left' if delta_n > 0 else 'right'
+
+            # Hysteresis: don't switch too quickly
+            if self._tactic_hold_steps > 0:
+                self._tactic_hold_steps -= 1
                 return
 
-        # --- Normal defend / follow behaviors ---
-        # v5.2: hysteresis — once a defend direction is chosen, hold it
-        # for at least 8 ticks (~1s) to prevent jittering
-        if self._tactic_hold_steps > 0:
-            self._tactic_hold_steps -= 1
-            return  # keep current tactic
+            # Check if we need to change direction
+            if self._block_dir == 'none':
+                # First block — choose direction freely
+                self._block_dir = ego_side
+                self._block_dir_changes = 0
+            elif self._block_dir != ego_side and not self._block_dir_locked:
+                # Ego switched sides — use our ONE allowed direction change
+                self._block_dir = ego_side
+                self._block_dir_changes += 1
+                if self._block_dir_changes >= 1:
+                    self._block_dir_locked = True  # LOCKED: no more changes
+                self._tactic_hold_steps = 12  # hold new direction ~1.5s
 
-        if delta_s < 0 and abs(delta_s) < 30.0:
-            delta_n = ego_state['n'] - self.n
-            # Use wider dead-zone (±2.0) and only switch when clearly on other side
-            if delta_n > 2.0:
-                new_tactic = 'defend_left'
-                new_offset = 0.5
-            elif delta_n < -2.0:
-                new_tactic = 'defend_right'
-                new_offset = -0.5
+            # Apply block: move aggressively toward ego's side
+            if self._block_dir == 'left':
+                self.tactic = 'defend_left'
+                self.target_n_offset = self._block_offset
             else:
-                # Inside dead-zone: keep previous defend direction, or center
-                if self.tactic in ('defend_left', 'defend_right'):
-                    return  # hold current defend
-                new_tactic = 'defend_center'
-                new_offset = 0.0
-
-            if new_tactic != self.tactic:
-                self._tactic_hold_steps = 8  # hold for ~1s
-            self.tactic = new_tactic
-            self.target_n_offset = new_offset
+                self.tactic = 'defend_right'
+                self.target_n_offset = -self._block_offset
         else:
+            # Ego far away — follow raceline
             self.tactic = 'follow'
             self.target_n_offset = 0.0
 
