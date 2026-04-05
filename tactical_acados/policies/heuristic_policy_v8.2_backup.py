@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Heuristic tactical policy v9 -- Clean, aggressive racing policy.
+Heuristic tactical policy v8 — 追击 + 内线超车
 
-Design (v9 rewrite):
-  1. gap > 15m: RACELINE, full speed chase
-  2. gap <= 15m: SHADOW on preferred side, no speed restriction
-  3. OVERTAKE: wide corridor, full speed, allowed in high-curvature
-     zones IF on inner side
-  4. Failed overtake: HOLD with tight gap (<=5m), quick retry
-  5. NO speed caps, NO acute-turn RACELINE retreat
-  6. High curvature: inner-side overtake only (forced by carver)
+设计哲学 (用户四条意见):
+  1. gap > 15m → 纯 RACELINE 硬追，不限制可行域，全速缩短距离
+  2. gap ≤ 15m → 根据态势就近跟车 (SHADOW)，慢慢换到内线方向
+  3. OVERTAKE → 宽走廊，给足空间，内侧超车
+  4. 所有模式不卡速度上限，没有速度就没有超车
 
 Phase flow:
-  RACELINE (gap>15) -> SHADOW (gap<=15, track + inner-line bias)
-  -> OVERTAKE (gap<=12, ready) -> (success) RACELINE
-                                -> (fail) HOLD -> SHADOW
+  RACELINE (gap>15 纯追) → SHADOW (gap≤15 就近跟+内线偏移)
+  → OVERTAKE (时机到 全速超) → (成功) RACELINE
+                                → (失败) HOLD → SHADOW
+
+Outputs:
+  - TacticalAction (for planner_guidance mapping)
+  - carver_mode_str / carver_side (for A2RLObstacleCarver)
 """
 
 import numpy as np
@@ -28,7 +29,15 @@ from config import TacticalConfig, DEFAULT_CONFIG
 
 
 class HeuristicTacticalPolicy:
-    """Stateful heuristic tactical policy v9."""
+    """
+    Stateful heuristic tactical policy v8
+
+    Phases:
+    - RACELINE: gap > 15m, 纯追赛车线. gap ≤ 15m 也无对手时用
+    - SHADOW:   gap ≤ 15m, 跟车+内线偏移. 不限制可行域，只输出侧向偏好
+    - OVERTAKE: 执行超车. 宽走廊，全速
+    - HOLD:     超车失败后稳定, raceline走廊 + 避障
+    """
 
     def __init__(self, cfg: TacticalConfig = DEFAULT_CONFIG):
         self.cfg = cfg
@@ -41,7 +50,7 @@ class HeuristicTacticalPolicy:
 
         # Overtake lock
         self._overtake_locked: bool = False
-        self._abort_cooldown: int = 0
+        self._abort_cooldown: int = 0       # steps
 
         # Hold mode
         self._hold_steps: int = 0
@@ -53,13 +62,13 @@ class HeuristicTacticalPolicy:
         # External signal from carver
         self._overtake_ready_ext: bool = False
 
-        # ---- Thresholds (v9) ----
-        self.chase_gap = 15.0           # gap > 15 -> RACELINE
-        self.ot_gap = 12.0              # gap < 12 + ready -> OT
-        self.abort_gap = 25.0           # gap > 25 -> abort OT
-        self.hold_duration = 40         # v9: shorter hold (~5s) for quick retry
-        self.curv_straight = 0.012      # straight threshold
-        self.ego_ahead_margin = 3.0
+        # ---- Thresholds ----
+        self.chase_gap = 15.0           # gap > 15 → RACELINE 纯追
+        self.ot_gap = 12.0              # gap < 12 + ready → OT
+        self.abort_gap = 25.0           # gap > 25 → abort OT
+        self.hold_duration = 80         # ~10s hold
+        self.curv_straight = 0.012      # 直道阈值
+        self.ego_ahead_margin = 3.0     # delta_s > margin → ego 已超过
 
         # ---- Carver mode output ----
         self._carver_mode_str = 'raceline'
@@ -68,6 +77,8 @@ class HeuristicTacticalPolicy:
         # ---- Debug ----
         self.debug_info = {}
 
+    # ------------------------------------------------------------------
+    # Public properties
     # ------------------------------------------------------------------
     @property
     def carver_mode_str(self) -> str:
@@ -103,7 +114,7 @@ class HeuristicTacticalPolicy:
         ego_is_ahead = (target.delta_s > self.ego_ahead_margin)
 
         # ============================================================
-        # Ego ahead -> switch target or RACELINE
+        # Ego ahead → switch target or RACELINE
         # ============================================================
         if ego_is_ahead:
             if self._overtake_locked:
@@ -129,7 +140,7 @@ class HeuristicTacticalPolicy:
                                       self._make_raceline_action(obs))
 
         # ============================================================
-        # Overtake locked -> check abort / continue
+        # Overtake locked → check abort / continue
         # ============================================================
         if self._overtake_locked:
             lat_clear = abs(target.delta_n)
@@ -138,7 +149,7 @@ class HeuristicTacticalPolicy:
             if gap > self.abort_gap or lat_abort:
                 self._overtake_locked = False
                 self._hold_side = self.locked_side
-                self._abort_cooldown = 10   # v9: shorter cooldown
+                self._abort_cooldown = 15
                 self._hold_steps = self.hold_duration
                 self._set_phase("HOLD")
             else:
@@ -152,8 +163,10 @@ class HeuristicTacticalPolicy:
         if self._hold_steps > 0:
             self._set_phase("HOLD")
 
-            # v9: If close and lateral contact risk, go SHADOW
+            # v8: 紧急避让 — HOLD 期间如果 gap 太小且侧向接近,
+            # 切换到 SHADOW 拉开距离, 防止追尾碰撞
             if gap < 5.0 and abs(target.delta_n) < 3.0:
+                # 紧急: 选择远离对手的一侧
                 if target.delta_n > 0:
                     self.locked_side = "right"
                 else:
@@ -163,7 +176,6 @@ class HeuristicTacticalPolicy:
                 return self._finalize(obs, target, gap,
                                       self._make_shadow_action(obs, target))
 
-            # v9: Re-enter overtake if window opens during HOLD
             if (gap < self.ot_gap and self._overtake_ready_ext
                     and self._abort_cooldown == 0):
                 self._overtake_locked = True
@@ -178,34 +190,38 @@ class HeuristicTacticalPolicy:
         # Normal mode selection
         # ============================================================
         if gap > self.chase_gap:
+            # >15m: 纯 RACELINE 硬追，不思考不犹豫
             self._set_phase("RACELINE")
             self.locked_side = None
             return self._finalize(obs, target, gap,
                                   self._make_raceline_action(obs))
 
-        # <= 15m: SHADOW
+        # ≤15m: 进入 SHADOW 跟车
         if self.locked_side is None:
             self.locked_side = self._choose_side(obs, target)
 
-        # v9: NO acute-turn RACELINE retreat
-        # (removed: high_curv && gap>8 -> RACELINE)
+        # ---- 急弯近距保护: 弯道中不主动追对手 ----
+        high_curv = (obs.upcoming_max_curvature > 0.04)
+        if high_curv and gap > 8.0:
+            # 弯道 + 距离尚远: 退回 RACELINE，安全通过弯道后再追
+            self._set_phase("RACELINE")
+            self.locked_side = None
+            return self._finalize(obs, target, gap,
+                                  self._make_raceline_action(obs))
 
-        # v9: Allow overtake in high curvature IF on inner side
-        is_inner_side = self._is_inner_side(obs, target)
+        # Check OT entry
         straight_enough = (obs.upcoming_max_curvature < self.curv_straight)
-        allow_ot = straight_enough or is_inner_side
-
         if (gap <= self.ot_gap and self._overtake_ready_ext
                 and self._abort_cooldown == 0
-                and allow_ot):
+                and straight_enough):
             self._overtake_locked = True
             self._set_phase("OVERTAKE")
             return self._finalize(obs, target, gap,
                                   self._make_overtake_action(obs, target))
 
-        # SHADOW
+        # SHADOW 跟车
         self._set_phase("SHADOW")
-        # Periodic side re-evaluation (slowly drift to inner line)
+        # 周期性重新评估侧向 (慢慢换到内线)
         if int(self.phase_time / self.dt) % 40 == 0:
             self.locked_side = self._choose_side(obs, target)
 
@@ -238,6 +254,8 @@ class HeuristicTacticalPolicy:
             self._carver_mode_str = 'raceline'
             self._carver_side = None
 
+    # ------------------------------------------------------------------
+    # Phase helpers
     # ------------------------------------------------------------------
     def _set_phase(self, phase: str):
         if phase != self.phase:
@@ -295,37 +313,45 @@ class HeuristicTacticalPolicy:
         return ahead[0]
 
     # ------------------------------------------------------------------
-    # Side selection
+    # Side selection — 就近 + 内线偏好
     # ------------------------------------------------------------------
     def _choose_side(self, obs: TacticalObservation,
                      target: OpponentState) -> str:
-        """Select overtake/shadow side: wider side + inner-line preference."""
+        """
+        选择超车/跟车侧:
+        1. 基础: 哪边空间大
+        2. 内线偏好: 下个弯道内侧加分
+        3. 就近: ego 当前偏向哪侧就倾向哪侧 (避免大机动)
+        4. yield感知: NPC yield 时选 NPC 让开的那一侧
+        """
         left_space = float(obs.w_left - obs.ego_n)
         right_space = float(abs(obs.w_right) + obs.ego_n)
         score_l = left_space
         score_r = right_space
 
-        # Opponent position bias
+        # 对手位置偏置
         opp_n = obs.ego_n - target.delta_n
         if opp_n > obs.ego_n + 0.5:
             score_r += 2.0
         elif opp_n < obs.ego_n - 0.5:
             score_l += 2.0
 
-        # Inner-line preference
+        # 内线偏好 (弯道一定要内线!)
+        # Omega_z > 0 → 左弯 → 内侧 = right
+        # Omega_z < 0 → 右弯 → 内侧 = left
         curv_sign = getattr(obs, 'upcoming_curvature_sign', 0.0)
         if curv_sign > 0.005:
             score_r += 3.0
         elif curv_sign < -0.005:
             score_l += 3.0
 
-        # Proximity bias (avoid large maneuver)
+        # 就近偏好 (避免大机动)
         if target.delta_n < -1.0:
             score_r += 1.5
         elif target.delta_n > 1.0:
             score_l += 1.5
 
-        # Yield awareness
+        # yield 感知
         opp_tactic = getattr(target, 'tactic', '')
         if opp_tactic == 'yield':
             if opp_n > obs.ego_n + 1.0:
@@ -334,19 +360,6 @@ class HeuristicTacticalPolicy:
                 score_l += 3.0
 
         return "left" if score_l >= score_r else "right"
-
-    def _is_inner_side(self, obs: TacticalObservation,
-                       target: OpponentState) -> bool:
-        """v9: Check if locked_side is the inner side of upcoming turn."""
-        if self.locked_side is None:
-            return False
-        curv_sign = getattr(obs, 'upcoming_curvature_sign', 0.0)
-        # Omega_z > 0 -> left turn -> inner = right
-        if curv_sign > 0.005 and self.locked_side == 'right':
-            return True
-        if curv_sign < -0.005 and self.locked_side == 'left':
-            return True
-        return False
 
     # ------------------------------------------------------------------
     # Action generation
