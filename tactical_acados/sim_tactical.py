@@ -368,7 +368,7 @@ def run_tactical_simulation(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Tactical Simulation')
-    parser.add_argument('--scenario', type=str, default='scenario_c', help='scenario_a, scenario_b, scenario_c')
+    parser.add_argument('--scenario', type=str, default='scenario_b', help='scenario_a, scenario_b, scenario_c')
     parser.add_argument('--policy', type=str, default='heuristic', choices=['heuristic', 'random', 'rl'], help='Tactical policy type')
     parser.add_argument('--max-steps', type=int, default=99999, help='Maximum simulation steps')
     parser.add_argument('--no-viz', action='store_true', help='Disable visualization')
