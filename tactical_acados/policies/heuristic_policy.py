@@ -200,6 +200,15 @@ class HeuristicTacticalPolicy:
         if self.locked_side is None:
             self.locked_side = self._choose_side(obs, target)
 
+        # ---- 急弯近距保护: 弯道中不主动追对手 ----
+        high_curv = (obs.upcoming_max_curvature > 0.04)
+        if high_curv and gap > 8.0:
+            # 弯道 + 距离尚远: 退回 RACELINE，安全通过弯道后再追
+            self._set_phase("RACELINE")
+            self.locked_side = None
+            return self._finalize(obs, target, gap,
+                                  self._make_raceline_action(obs))
+
         # Check OT entry
         straight_enough = (obs.upcoming_max_curvature < self.curv_straight)
         if (gap <= self.ot_gap and self._overtake_ready_ext

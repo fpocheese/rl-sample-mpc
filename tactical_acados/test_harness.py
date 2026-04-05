@@ -133,6 +133,7 @@ def run_test(scenario_name='scenario_c', max_steps=1500, verbose=True):
             ego_state, opp_states, cfg.N_steps_acados, ds,
             mode=c_mode, shadow_side=c_side, overtake_side=c_side,
             prev_trajectory=planner._prev_trajectory,
+            planner_healthy=planner.planner_healthy,
         )
         if carver_guidance.n_left_override is not None:
             guidance.n_left_override = carver_guidance.n_left_override
@@ -168,7 +169,24 @@ def run_test(scenario_name='scenario_c', max_steps=1500, verbose=True):
         data['locked_side'].append(policy_debug.get('locked_side'))
 
         if not planner.planner_healthy:
-            data['planner_fails'].append(step)
+            # 记录 fail 详情: 可行域宽度 + 对手距离
+            corridor_widths = []
+            if guidance.n_left_override is not None and guidance.n_right_override is not None:
+                for ci in range(min(10, len(guidance.n_left_override))):
+                    cw = guidance.n_left_override[ci] - guidance.n_right_override[ci]
+                    corridor_widths.append(cw)
+            min_cw = min(corridor_widths) if corridor_widths else -1
+            opp_dists = []
+            for opp in opponents:
+                ds_o = opp.s - ego_state['s']
+                opp_dists.append((opp.vehicle_id, ds_o, opp.n))
+            data['planner_fails'].append({
+                'step': step, 's': ego_state['s'], 'n': ego_state['n'],
+                'V': ego_state['V'], 'chi': ego_state.get('chi', 0),
+                'mode': c_mode.name, 'side': c_side,
+                'min_corridor': min_cw,
+                'opp_dists': opp_dists,
+            })
 
         # 8) Collision check
         for opp in opponents:
@@ -177,7 +195,8 @@ def run_test(scenario_name='scenario_c', max_steps=1500, verbose=True):
                 collision_count += 1
                 ds_col = ego_state['s'] - opp.s
                 data['collisions'].append((step, opp.vehicle_id, dist,
-                    ego_state['s'], ego_state['n'], opp.n, ds_col))
+                    ego_state['s'], ego_state['n'], opp.n, ds_col,
+                    policy_debug.get('phase', 'N/A'), c_mode.name))
 
         # 9) Track overtake events
         for opp in opponents:
@@ -216,13 +235,47 @@ def analyze(data, collision_count, elapsed, max_steps):
     print(f"碰撞总数: {collision_count}")
     print(f"Planner失败次数: {len(data['planner_fails'])}")
 
+    # Planner fail 诊断
+    if data['planner_fails']:
+        print("\n--- Planner失败诊断 ---")
+        # 按s位置分桶统计
+        from collections import Counter, defaultdict
+        fail_s_buckets = defaultdict(list)
+        for f in data['planner_fails']:
+            bucket = int(f['s'] / 100) * 100
+            fail_s_buckets[bucket].append(f)
+        print("  按位置分布:")
+        for bucket in sorted(fail_s_buckets.keys()):
+            fails = fail_s_buckets[bucket]
+            modes = Counter(f['mode'] for f in fails)
+            min_cw = min(f['min_corridor'] for f in fails)
+            avg_v = np.mean([f['V'] for f in fails])
+            print(f"    s={bucket:4d}~{bucket+100}: {len(fails):3d}次 "
+                  f"min_corridor={min_cw:.2f}m avg_V={avg_v:.1f} modes={dict(modes)}")
+        # 前5个fail详情
+        print("  前5个fail详情:")
+        for f in data['planner_fails'][:5]:
+            opp_str = " ".join(f"Opp{oid}(ds={ds:.1f},n={n:.1f})" for oid, ds, n in f['opp_dists'])
+            print(f"    Step {f['step']}: s={f['s']:.0f} n={f['n']:.2f} V={f['V']:.1f} "
+                  f"chi={f['chi']:.3f} {f['mode']} {f['side'] or ''} "
+                  f"corridor={f['min_corridor']:.2f}m | {opp_str}")
+        # 代表性采样: 每50个fail取1个
+        if len(data['planner_fails']) > 10:
+            print("  采样详情(每50个):")
+            for idx in range(0, len(data['planner_fails']), 50):
+                f = data['planner_fails'][idx]
+                opp_str = " ".join(f"Opp{oid}(ds={ds:.1f},n={n:.1f})" for oid, ds, n in f['opp_dists'])
+                print(f"    [{idx}] Step {f['step']}: s={f['s']:.0f} n={f['n']:.2f} V={f['V']:.1f} "
+                      f"chi={f['chi']:.3f} {f['mode']} corridor={f['min_corridor']:.2f}m | {opp_str}")
+
     # 碰撞详情
     if data['collisions']:
         print("\n--- 碰撞详情 ---")
         for col in data['collisions']:
-            step, opp_id, dist, ego_s, ego_n, opp_n, ds = col
+            step, opp_id, dist, ego_s, ego_n, opp_n, ds, phase, cmode = col
             print(f"  Step {step}: Opp{opp_id} dist={dist:.2f}m ego_s={ego_s:.0f} "
-                  f"ego_n={ego_n:.2f} opp_n={opp_n:.2f} ds={ds:.1f}")
+                  f"ego_n={ego_n:.2f} opp_n={opp_n:.2f} ds={ds:.1f} "
+                  f"[{phase}/{cmode}]")
 
     # 超车事件
     print(f"\n--- 超车事件 ({len(data['overtake_events'])}) ---")
@@ -286,7 +339,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--scenario', default='scenario_c')
-    parser.add_argument('--steps', type=int, default=1500)
+    parser.add_argument('--steps', type=int, default=2000)
     parser.add_argument('-q', '--quiet', action='store_true')
     args = parser.parse_args()
 

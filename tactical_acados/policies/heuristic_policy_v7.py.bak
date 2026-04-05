@@ -1,0 +1,580 @@
+# -*- coding: utf-8 -*-
+"""
+Heuristic tactical policy v3 — SHADOW-centric multi-car intelligence.
+
+Ported from dual_combat/sim_dual.py (v5.2) auto mode state machine,
+extended for 2-opponent scenarios.
+
+Core design:
+  - Focus on nearest opponent ahead ("one-at-a-time" strategy)
+  - SHADOW is the primary close-range mode (side-track → create opportunity)
+  - Curvature-aware OT: only commit on straights (or mild curves with NPC yield)
+  - HOLD mode after OT abort to prevent gap explosion
+  - Ego ahead of current target → RACELINE or switch to next target
+  - Two-car intelligence: if 2 opps far apart, treat as sequential 1v1
+
+Phase flow (mirroring dual v5.2):
+  RACELINE <-> FOLLOW -> SHADOW -> OVERTAKE -> (success -> RACELINE)
+                                      |
+                                  OT_ABORT -> HOLD -> SHADOW
+
+Outputs:
+  - TacticalAction (for planner_guidance mapping)
+  - carver_mode_str / carver_side (for A2RLObstacleCarver)
+"""
+
+import numpy as np
+from typing import Optional, List
+
+from tactical_action import (
+    TacticalAction, DiscreteTactic, PreferenceVector,
+)
+from observation import TacticalObservation, OpponentState
+from config import TacticalConfig, DEFAULT_CONFIG
+
+
+class HeuristicTacticalPolicy:
+    """
+    Stateful heuristic tactical policy v3 — SHADOW-centric.
+
+    Internal phases (matching dual v5.2):
+    - RACELINE: ego ahead of all opps, or no relevant opp
+    - FOLLOW: gap > 50, pure chase
+    - SHADOW: gap 15-50, side-tracking to create opportunity
+    - OVERTAKE: gap < 15 + straight enough, executing pass
+    - HOLD: post-abort stabilization (RACELINE corridor + speed match)
+    """
+
+    def __init__(self, cfg: TacticalConfig = DEFAULT_CONFIG):
+        self.cfg = cfg
+        self.dt = float(cfg.assumed_calc_time)
+
+        # ---- FSM state ----
+        self.phase: str = "RACELINE"
+        self.target_id: Optional[int] = None
+        self.phase_time: float = 0.0
+
+        # Overtake lock
+        self._overtake_locked: bool = False
+        self._abort_shadow_side: Optional[str] = None
+        self._abort_cooldown: int = 0       # steps
+
+        # Hold mode
+        self._hold_steps: int = 0           # remaining hold steps
+        self._hold_side: Optional[str] = None
+        self._hold_gap_at_entry: float = 30.0
+
+        # Shadow side
+        self.locked_side: Optional[str] = None
+
+        # External signal
+        self._overtake_ready_ext: bool = False
+
+        # ---- Tunable thresholds (from dual v5.2) ----
+        self.follow_gap = 50.0          # gap > 50 -> FOLLOW
+        self.shadow_gap = 15.0          # gap 15-50 -> SHADOW
+        self.ot_gap = 15.0              # gap < 15 -> OT candidate
+        self.abort_gap = 25.0           # abort OT if gap > 25
+        self.hold_duration = 120        # ~15s hold
+        self.hold_gap_margin = 25.0     # HOLD->SHADOW if gap > entry+25
+
+        self.curv_straight = 0.012      # max curvature for "straight enough"
+        self.curv_yield_ok = 0.025      # relaxed threshold when opp yields
+        self.ego_ahead_margin = 3.0     # delta_s > margin -> ego is ahead
+        self.ot_lateral_abort_threshold = 2.8  # |delta_n| < this → abort OT
+
+        # ---- Carver mode output ----
+        self._carver_mode_str = 'raceline'
+        self._carver_side = None
+
+        # ---- Debug info ----
+        self.debug_info = {}
+
+    # ------------------------------------------------------------------
+    # Public properties for carver integration
+    # ------------------------------------------------------------------
+    @property
+    def carver_mode_str(self) -> str:
+        return self._carver_mode_str
+
+    @property
+    def carver_side(self) -> Optional[str]:
+        return self._carver_side
+
+    def set_overtake_ready(self, ready: bool):
+        self._overtake_ready_ext = ready
+
+    # ------------------------------------------------------------------
+    # Main entry
+    # ------------------------------------------------------------------
+    def act(self, obs: TacticalObservation) -> TacticalAction:
+        self.phase_time += self.dt
+
+        # Decrement cooldowns
+        if self._abort_cooldown > 0:
+            self._abort_cooldown -= 1
+        if self._hold_steps > 0:
+            self._hold_steps -= 1
+
+        # ---- Select target: nearest opponent AHEAD ----
+        target, all_ahead = self._select_target(obs)
+
+        if target is None:
+            self._reset_to_raceline()
+            action = self._make_raceline_action(obs)
+            self._update_carver_output()
+            self._build_debug(obs, target, None)
+            return action
+
+        gap = abs(target.delta_s)
+        ego_is_ahead = (target.delta_s > self.ego_ahead_margin)
+
+        # Curvature check
+        max_curv = obs.upcoming_max_curvature
+        straight_enough = (max_curv < self.curv_straight)
+
+        # ============================================================
+        # RULE #0: Ego ahead of target -> handle smartly
+        # ============================================================
+        if ego_is_ahead:
+            if self._overtake_locked:
+                self._overtake_locked = False
+                self._abort_shadow_side = None
+                self._hold_steps = 0
+                self._hold_side = None
+
+            # Check if there's another opponent still ahead
+            next_target = self._find_next_target(obs, exclude_id=target.vehicle_id)
+            if next_target is not None:
+                self.target_id = next_target.vehicle_id
+                target = next_target
+                gap = abs(target.delta_s)
+                ego_is_ahead = (target.delta_s > self.ego_ahead_margin)
+                if ego_is_ahead:
+                    self._reset_to_raceline()
+                    action = self._make_raceline_action(obs)
+                    self._update_carver_output()
+                    self._build_debug(obs, target, gap)
+                    return action
+                # Reset locked side for new target
+                self.locked_side = None
+            else:
+                self._reset_to_raceline()
+                action = self._make_raceline_action(obs)
+                self._update_carver_output()
+                self._build_debug(obs, target, gap)
+                return action
+
+        # ============================================================
+        # Overtake locked: check abort/continue
+        # ============================================================
+        if self._overtake_locked:
+            # v7: lateral clearance abort — if delta_n shrinks too much
+            # during OT, the corridor isn't keeping us safe → abort early
+            lat_clear = abs(target.delta_n)
+            lat_abort = (lat_clear < self.ot_lateral_abort_threshold
+                         and gap < 8.0)  # only near opp
+
+            if gap > self.abort_gap or lat_abort:
+                self._overtake_locked = False
+                self._hold_side = self.locked_side
+                self._abort_cooldown = 15
+                self._hold_steps = self.hold_duration
+                self._hold_gap_at_entry = gap
+                self._set_phase("HOLD")
+            else:
+                self._set_phase("OVERTAKE")
+                action = self._make_overtake_action(obs, target)
+                self._update_carver_output()
+                self._build_debug(obs, target, gap)
+                return action
+
+        # ============================================================
+        # HOLD mode: RACELINE corridor + speed match
+        # ============================================================
+        if self._hold_steps > 0:
+            self._set_phase("HOLD")
+
+            if gap > self._hold_gap_at_entry + self.hold_gap_margin:
+                self._hold_steps = 0
+                self._set_phase("SHADOW")
+            elif (gap > 5.0 and gap < self.ot_gap
+                  and self._overtake_ready_ext and straight_enough):
+                self._overtake_locked = True
+                self._hold_steps = 0
+                self._abort_cooldown = 0
+                self._set_phase("OVERTAKE")
+                action = self._make_overtake_action(obs, target)
+                self._update_carver_output()
+                self._build_debug(obs, target, gap)
+                return action
+
+            if self.phase == "HOLD":
+                action = self._make_hold_action(obs, target)
+                self._update_carver_output()
+                self._build_debug(obs, target, gap)
+                return action
+
+        # ============================================================
+        # Normal mode selection (ego behind target) — SHADOW-centric
+        # ============================================================
+        curv_ok = straight_enough
+
+        # Multi-car safety: check if another opp is close behind target
+        # If two opps are bunched up (<40m apart), don't OT — too risky
+        # to squeeze through. Wait for them to separate.
+        two_car_block = self._two_car_bunched(obs, target)
+
+        # v6: check lateral offset readiness — ego must be on the
+        # intended overtake side with sufficient clearance before
+        # committing to OVERTAKE. Otherwise keep SHADOW to build offset.
+        lateral_ready = self._lateral_ready(obs, target)
+
+        if (gap <= self.ot_gap and self._overtake_ready_ext
+                and (self._abort_cooldown == 0)
+                and curv_ok
+                and not two_car_block
+                and lateral_ready):
+            if self.locked_side is None:
+                self.locked_side = self._choose_side(obs, target)
+            self._overtake_locked = True
+            self._abort_shadow_side = None
+            self._hold_side = None
+            self._set_phase("OVERTAKE")
+            action = self._make_overtake_action(obs, target)
+
+        elif gap > self.follow_gap:
+            self._set_phase("FOLLOW")
+            self._abort_shadow_side = None
+            action = self._make_follow_action(obs, target)
+
+        else:
+            # gap 15-50: SHADOW
+            if self.locked_side is None:
+                self.locked_side = self._choose_side(obs, target)
+            self._set_phase("SHADOW")
+            action = self._make_shadow_action(obs, target)
+
+        self._update_carver_output()
+        self._build_debug(obs, target, gap)
+        return action
+
+    # ------------------------------------------------------------------
+    # Carver mode mapping
+    # ------------------------------------------------------------------
+    def _update_carver_output(self):
+        if self.phase == "RACELINE":
+            self._carver_mode_str = 'raceline'
+            self._carver_side = None
+        elif self.phase == "FOLLOW":
+            self._carver_mode_str = 'follow'
+            self._carver_side = None
+        elif self.phase == "SHADOW":
+            self._carver_mode_str = 'shadow'
+            self._carver_side = self.locked_side
+        elif self.phase == "OVERTAKE":
+            self._carver_mode_str = 'overtake'
+            self._carver_side = self.locked_side
+        elif self.phase == "HOLD":
+            # v6: use CarverMode.HOLD — raceline corridor + PID speed
+            # + opponent avoidance overlay
+            self._carver_mode_str = 'hold'
+            self._carver_side = self._hold_side
+        else:
+            self._carver_mode_str = 'follow'
+            self._carver_side = None
+
+    # ------------------------------------------------------------------
+    # Phase helpers
+    # ------------------------------------------------------------------
+    def _set_phase(self, phase: str):
+        if phase != self.phase:
+            self.phase = phase
+            self.phase_time = 0.0
+
+    def _reset_to_raceline(self):
+        self.phase = "RACELINE"
+        self.phase_time = 0.0
+        self._overtake_locked = False
+        self._abort_shadow_side = None
+        self._hold_steps = 0
+        self._hold_side = None
+        self._abort_cooldown = 0
+
+    # ------------------------------------------------------------------
+    # Target selection
+    # ------------------------------------------------------------------
+    def _select_target(self, obs: TacticalObservation):
+        ahead = [o for o in obs.opponents if o.delta_s < 0 and abs(o.delta_s) < 120.0]
+        alongside = [o for o in obs.opponents
+                     if abs(o.delta_s) <= self.ego_ahead_margin
+                     and o not in ahead]
+        all_relevant = ahead + alongside
+
+        if not all_relevant:
+            just_behind = [o for o in obs.opponents
+                           if o.delta_s > 0 and o.delta_s < 10.0]
+            if just_behind:
+                all_relevant = just_behind
+
+        if not all_relevant:
+            return None, []
+
+        all_relevant.sort(key=lambda o: abs(o.delta_s))
+
+        if self.target_id is not None and self._overtake_locked:
+            for o in all_relevant:
+                if o.vehicle_id == self.target_id:
+                    return o, all_relevant
+
+        target = all_relevant[0]
+        self.target_id = target.vehicle_id
+        return target, all_relevant
+
+    def _find_next_target(self, obs: TacticalObservation,
+                          exclude_id: int) -> Optional[OpponentState]:
+        ahead = [o for o in obs.opponents
+                 if o.delta_s < -self.ego_ahead_margin
+                 and o.vehicle_id != exclude_id
+                 and abs(o.delta_s) < 120.0]
+        if not ahead:
+            return None
+        ahead.sort(key=lambda o: abs(o.delta_s))
+        return ahead[0]
+
+    # ------------------------------------------------------------------
+    # Multi-car safety check
+    # ------------------------------------------------------------------
+    def _two_car_bunched(self, obs: TacticalObservation,
+                         target: OpponentState) -> bool:
+        """
+        Check if there's another opponent close to the target.
+        If two opps are within 40m of each other and both ahead,
+        it's too risky to OT — could get sandwiched.
+        """
+        for o in obs.opponents:
+            if o.vehicle_id == target.vehicle_id:
+                continue
+            # Both must be ahead of ego
+            if o.delta_s > 0:
+                continue
+            # Check distance between target and other opp
+            inter_opp_gap = abs(o.delta_s - target.delta_s)
+            if inter_opp_gap < 40.0:
+                return True
+        return False
+
+    def _lateral_ready(self, obs: TacticalObservation,
+                       target: OpponentState) -> bool:
+        """
+        Check if ego has sufficient lateral offset on the intended
+        overtake side AND the NPC is not actively defending that side.
+        
+        delta_n = ego_n - opp_n:
+        - right side: delta_n < 0 → need delta_n < -min_offset
+        - left  side: delta_n > 0 → need delta_n > +min_offset
+        
+        v6: If NPC defends our side, flip locked_side and reject this
+        cycle (SHADOW will build offset on the new side).
+        
+        v7: If NPC yields toward the same side as our intended pass,
+        flip to opposite side (NPC yield creates space on the other side).
+        """
+        min_offset = 3.5
+        side = self.locked_side
+        if side is None:
+            return True
+
+        opp_tactic = getattr(target, 'tactic', 'follow')
+
+        # Flip side if NPC defends our intended pass side
+        if side == 'right' and opp_tactic == 'defend_right':
+            self.locked_side = 'left'
+            return False
+        if side == 'left' and opp_tactic == 'defend_left':
+            self.locked_side = 'right'
+            return False
+
+        # v7: Flip side if NPC yields toward our intended pass side.
+        # opp_n = ego_n - delta_n
+        if opp_tactic == 'yield':
+            opp_n = obs.ego_n - target.delta_n
+            # 'right' means ego passes on small-n side.
+            # If opp also has small n (< ego_n - 1.0), opp yielded right → flip to left
+            if side == 'right' and opp_n < obs.ego_n - 1.0:
+                self.locked_side = 'left'
+                return False
+            # 'left' means ego passes on large-n side.
+            # If opp also has large n (> ego_n + 1.0), opp yielded left → flip to right
+            if side == 'left' and opp_n > obs.ego_n + 1.0:
+                self.locked_side = 'right'
+                return False
+
+        dn = target.delta_n  # ego_n - opp_n
+        if side == 'right':
+            return dn < -min_offset
+        else:  # left
+            return dn > min_offset
+
+    # ------------------------------------------------------------------
+    # Side selection
+    # ------------------------------------------------------------------
+    def _choose_side(self, obs: TacticalObservation,
+                     target: OpponentState) -> str:
+        left_space = float(obs.w_left - obs.ego_n)
+        right_space = float(abs(obs.w_right) + obs.ego_n)
+
+        opp_bias_left = 0.0
+        opp_bias_right = 0.0
+        if target.delta_n < -0.5:
+            opp_bias_right += 1.0
+            opp_bias_left -= 0.5
+        elif target.delta_n > 0.5:
+            opp_bias_left += 1.0
+            opp_bias_right -= 0.5
+
+        curv_bias_left = 1.0 if obs.curvature > 0.005 else 0.0
+        curv_bias_right = 1.0 if obs.curvature < -0.005 else 0.0
+
+        # v7: yield-aware bias — when NPC yields, it shifts laterally.
+        # We should pass on the side NPC moved AWAY from (the opened gap).
+        # opp_n = ego_n - delta_n; if opp_n > ego_n → NPC is to the left
+        # → pass on right (NPC opened the right/center). Vice versa.
+        opp_tactic = getattr(target, 'tactic', '')
+        if opp_tactic == 'yield':
+            opp_n = obs.ego_n - target.delta_n
+            if opp_n > obs.ego_n + 1.0:
+                # NPC shifted left → strong right preference
+                opp_bias_right += 3.0
+                opp_bias_left -= 2.0
+            elif opp_n < obs.ego_n - 1.0:
+                # NPC shifted right → strong left preference
+                opp_bias_left += 3.0
+                opp_bias_right -= 2.0
+
+        left_score = left_space + opp_bias_left + curv_bias_left
+        right_score = right_space + opp_bias_right + curv_bias_right
+
+        return "left" if left_score >= right_score else "right"
+
+    # ------------------------------------------------------------------
+    # Action generation
+    # ------------------------------------------------------------------
+    def _make_raceline_action(self, obs):
+        return TacticalAction(
+            discrete_tactic=DiscreteTactic.RACE_LINE,
+            aggressiveness=1.0,
+            preference=PreferenceVector(
+                rho_v=0.0, rho_n=0.0, rho_s=1.0, rho_w=1.0,
+            ),
+            p2p_trigger=False,
+        )
+
+    def _make_follow_action(self, obs, target):
+        return TacticalAction(
+            discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
+            aggressiveness=0.95,
+            preference=PreferenceVector(
+                rho_v=0.16, rho_n=0.0, rho_s=0.95, rho_w=1.25,
+            ),
+            p2p_trigger=False,
+        )
+
+    def _make_shadow_action(self, obs, target):
+        side = self.locked_side or "left"
+        if side == "left":
+            tactic = DiscreteTactic.PREPARE_OVERTAKE_LEFT
+            rho_n = 0.55
+        else:
+            tactic = DiscreteTactic.PREPARE_OVERTAKE_RIGHT
+            rho_n = -0.55
+
+        return TacticalAction(
+            discrete_tactic=tactic,
+            aggressiveness=0.88,
+            preference=PreferenceVector(
+                rho_v=0.08, rho_n=rho_n, rho_s=0.95, rho_w=1.40,
+            ),
+            p2p_trigger=False,
+        )
+
+    def _make_overtake_action(self, obs, target):
+        side = self.locked_side or "left"
+        if side == "left":
+            tactic = DiscreteTactic.OVERTAKE_LEFT
+            rho_n = 1.15
+        else:
+            tactic = DiscreteTactic.OVERTAKE_RIGHT
+            rho_n = -1.15
+
+        gap = abs(target.delta_s)
+        dv = float(obs.ego_V - target.V)
+
+        use_p2p = (
+            obs.p2p_available
+            and gap < 12.0
+            and obs.upcoming_max_curvature < 0.015
+            and dv < 3.0
+        )
+
+        return TacticalAction(
+            discrete_tactic=tactic,
+            aggressiveness=1.0,
+            preference=PreferenceVector(
+                rho_v=0.18, rho_n=rho_n, rho_s=0.90, rho_w=1.70,
+            ),
+            p2p_trigger=use_p2p,
+        )
+
+    def _make_hold_action(self, obs, target):
+        return TacticalAction(
+            discrete_tactic=DiscreteTactic.FOLLOW_CENTER,
+            aggressiveness=0.85,
+            preference=PreferenceVector(
+                rho_v=0.10, rho_n=0.0, rho_s=1.0, rho_w=1.15,
+            ),
+            p2p_trigger=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Debug info
+    # ------------------------------------------------------------------
+    def _build_debug(self, obs, target, gap):
+        self.debug_info = {
+            "phase": self.phase,
+            "target_id": self.target_id,
+            "gap": gap,
+            "locked_side": self.locked_side,
+            "phase_time": self.phase_time,
+            "cooldown_time": self._abort_cooldown * self.dt,
+            "raw_tactic": "N/A",
+            "safe_set": [],
+            "carver_mode": self._carver_mode_str,
+            "carver_side": self._carver_side,
+            "overtake_ready_ext": self._overtake_ready_ext,
+            "hold_steps": self._hold_steps,
+            "overtake_locked": self._overtake_locked,
+        }
+
+    # ------------------------------------------------------------------
+    # Legacy compatibility
+    # ------------------------------------------------------------------
+    def get_continuous_target(self, discrete_tactic, obs):
+        if discrete_tactic == DiscreteTactic.FOLLOW_CENTER:
+            return np.array([0.85, 0.08, 0.0, 1.00, 1.15])
+        elif discrete_tactic == DiscreteTactic.RACE_LINE:
+            return np.array([1.00, 0.00, 0.0, 1.00, 1.00])
+        elif discrete_tactic == DiscreteTactic.OVERTAKE_LEFT:
+            return np.array([1.00, 0.18, 1.15, 0.90, 1.70])
+        elif discrete_tactic == DiscreteTactic.OVERTAKE_RIGHT:
+            return np.array([1.00, 0.18, -1.15, 0.90, 1.70])
+        elif discrete_tactic == DiscreteTactic.DEFEND_LEFT:
+            return np.array([0.70, 0.03, 0.60, 1.10, 1.50])
+        elif discrete_tactic == DiscreteTactic.DEFEND_RIGHT:
+            return np.array([0.70, 0.03, -0.60, 1.10, 1.50])
+        elif discrete_tactic == DiscreteTactic.PREPARE_OVERTAKE_LEFT:
+            return np.array([0.92, 0.10, 0.70, 0.95, 1.55])
+        elif discrete_tactic == DiscreteTactic.PREPARE_OVERTAKE_RIGHT:
+            return np.array([0.92, 0.10, -0.70, 0.95, 1.55])
+        else:
+            return np.array([0.7, 0.0, 0.0, 1.0, 1.0])

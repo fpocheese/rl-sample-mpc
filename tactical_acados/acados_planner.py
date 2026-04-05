@@ -279,14 +279,23 @@ class AcadosTacticalPlanner:
 
     def _generate_fallback(self, state: dict) -> dict:
         """
-        Generate fallback trajectory by holding array states or rolling historic traces.
-        Reverted to earlier stable version that does not decay speed exponentially.
+        Generate fallback trajectory.
+        - consecutive_failures < 5: roll previous trajectory (mild hiccup)
+        - consecutive_failures >= 5: generate recovery trajectory that
+          straightens chi towards 0 while keeping current n.
+          This prevents the "stuck in bad state" death spiral.
         """
         N = self.cfg.n_trajectory_points
         dt = self.cfg.dt
         horizon = self.cfg.planning_horizon
 
-        # If we have a successful previous trajectory, use it as the base
+        # === Recovery mode: straighten chi, keep n, drive forward ===
+        if self._consecutive_failures >= 5:
+            traj = self._generate_recovery_trajectory(state)
+            self._prev_trajectory = traj  # update so next roll uses recovery
+            return traj
+
+        # === Mild fallback: roll previous trajectory ===
         if self._prev_trajectory is not None:
             traj = {}
             for key, val in self._prev_trajectory.items():
@@ -300,27 +309,77 @@ class AcadosTacticalPlanner:
             return traj
 
         # Absolute cold fallback if no history
+        return self._generate_recovery_trajectory(state)
+
+    def _generate_recovery_trajectory(self, state: dict) -> dict:
+        """Generate a recovery trajectory that gradually straightens chi→0,
+        keeps current n (safe — don't drift into opponents), and drives forward
+        at reduced speed.
+        
+        This breaks the death spiral where large chi + low speed causes
+        infinite consecutive planner failures.
+        """
+        N = self.cfg.n_trajectory_points
+        horizon = self.cfg.planning_horizon
         t_out = np.linspace(0.0, horizon, N)
+
+        chi0 = state['chi']
         v0 = max(state['V'], 5.0)
-        s_out = (state['s'] + v0 * t_out) % self.track_handler.s[-1]
-        n_out = np.full(N, state['n'])
-        xyz = self.track_handler.sn2cartesian(s_out, n_out)
+        n0 = state['n']
+        s0 = state['s']
+
+        # Exponentially decay chi towards 0 — straighten out
+        tau_chi = 0.8
+        chi_out = chi0 * np.exp(-t_out / tau_chi)
+
+        # Keep speed stable — just cap at safe level
+        v_safe = np.clip(v0, 5.0, 30.0)
+        v_out = np.full(N, v_safe)
+
+        # Keep n constant (safe — don't drift sideways)
+        n_out = np.full(N, n0)
+
+        # Integrate s along track
+        s_out = np.zeros(N)
+        s_out[0] = s0
+        track_len = self.track_handler.s[-1]
+        for i in range(1, N):
+            dt_i = t_out[i] - t_out[i - 1]
+            Omega_z = np.interp(s_out[i - 1] % track_len,
+                                self.track_handler.s,
+                                self.track_handler.Omega_z,
+                                period=track_len)
+            denom = max(1.0 - n_out[i - 1] * Omega_z, 0.3)
+            s_dot_i = v_out[i - 1] * np.cos(chi_out[i - 1]) / denom
+            s_out[i] = s_out[i - 1] + max(s_dot_i, 1.0) * dt_i
+
+        s_wrapped = s_out % track_len
+
+        # Compute Cartesian
+        xyz = self.track_handler.sn2cartesian(s_wrapped, n_out)
         if xyz.ndim == 1:
             xyz = xyz.reshape(1, -1)
 
+        # Compute derivatives
+        Omega_z_arr = np.interp(s_wrapped, self.track_handler.s,
+                                self.track_handler.Omega_z,
+                                period=track_len)
+        s_dot = v_out * np.cos(chi_out) / np.maximum(1.0 - n_out * Omega_z_arr, 0.3)
+        n_dot = v_out * np.sin(chi_out)
+
         return {
             't': t_out,
-            's': s_out,
+            's': s_wrapped,
             'n': n_out,
-            'V': np.full(N, v0),
-            'chi': np.full(N, state['chi']),
+            'V': v_out,
+            'chi': chi_out,
             'ax': np.zeros(N),
             'ay': np.zeros(N),
             'x': xyz[:, 0],
             'y': xyz[:, 1],
             'z': xyz[:, 2],
-            's_dot': np.full(N, v0),
-            'n_dot': np.zeros(N),
+            's_dot': s_dot,
+            'n_dot': n_dot,
             's_ddot': np.zeros(N),
             'n_ddot': np.zeros(N),
         }

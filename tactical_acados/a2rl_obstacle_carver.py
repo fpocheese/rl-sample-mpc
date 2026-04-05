@@ -134,7 +134,8 @@ class A2RLObstacleCarver:
     # ==================================================================
     def construct_guidance(self, ego_state, opp_states, N_stages, ds,
                            mode=None, shadow_side=None, overtake_side=None,
-                           prev_trajectory=None, target_opp_id=None):
+                           prev_trajectory=None, target_opp_id=None,
+                           planner_healthy=True):
         if mode is None:
             mode = CarverMode.OVERTAKE
 
@@ -267,6 +268,11 @@ class A2RLObstacleCarver:
         # v8: 公共安全层 — 所有模式结束后对全部对手做安全排斥
         self._apply_all_opp_safety(ego_state, opp_states, s_arr, t_arr,
                                     w_left, w_right, max_v_node)
+
+        # v8.1: RACELINE接近对手时限速 — 防止高速冲向对手
+        if mode == CarverMode.RACELINE:
+            speed_scale = self._proximity_speed_limit(
+                ego_state, opp_states, speed_scale)
 
         w_left, w_right = self._smooth_boundaries(w_left, w_right, N_stages)
         w_left, w_right = self._ensure_feasibility(
@@ -461,6 +467,16 @@ class A2RLObstacleCarver:
         gap_current = self._signed_gap(target['s'], ego_state['s'])
         sign = 1.0 if shadow_side == 'left' else -1.0
 
+        # v8.1: 查询前方曲率 — 急弯时增大侧向偏移和排斥量
+        ego_s = ego_state['s']
+        s_look = np.linspace(ego_s, ego_s + 80.0, 25) % self.track_len
+        omega_vals = np.interp(s_look, self.track_handler.s,
+                               self.track_handler.Omega_z,
+                               period=self.track_len)
+        max_curv = float(np.max(np.abs(omega_vals)))
+        # 急弯系数: curv>0.03 → 0~1, 线性
+        curv_factor = float(np.clip((max_curv - 0.03) / 0.07, 0.0, 1.0))
+
         speed_scale = 1.0
         if gap_current > 0:
             speed_cmd = self._shadow_pid.compute(
@@ -483,7 +499,9 @@ class A2RLObstacleCarver:
                 continue
             fade = self._cosine_fade(ds_abs, self.safety_s)
             fade *= self._startup_ramp(i)
-            offset = sign * self.shadow_lateral_offset * fade
+            # v8.1: 急弯时增大侧向偏移 — 保持更大横向间距
+            lat_offset = self.shadow_lateral_offset + curv_factor * 2.0  # 3.5 → 最高5.5
+            offset = sign * lat_offset * fade
             center = opp_n_pred + offset
             corridor_half = self.shadow_funnel_half + (1.0 - fade) * 5.0
             if shadow_side == 'left':
@@ -498,7 +516,9 @@ class A2RLObstacleCarver:
             # v8: 安全约束 — SHADOW 近距离时强制排斥对手
             # 基于 ego 实际位置(而非 shadow_side)确定排斥方向
             if ds_abs < 15.0:
-                safety_excl = max((self.opp_half_w + self.opp_clearance) * fade, 3.5)
+                # v8.1: 急弯时增大排斥 — 补偿 frenet→cartesian 偏差
+                min_excl = 3.5 + curv_factor * 1.5  # 3.5 → 最高5.0
+                safety_excl = max((self.opp_half_w + self.opp_clearance) * fade, min_excl)
                 ego_n_now = ego_state.get('n', 0.0)
                 if ego_n_now > opp_n_pred:
                     # ego 在 opp 左侧(上方), 右边界推到 opp 右侧
@@ -711,30 +731,66 @@ class A2RLObstacleCarver:
             w_right[:n] = w_r_sm[:n]
         return w_left, w_right
 
+    def _proximity_speed_limit(self, ego_state, opp_states, speed_scale):
+        """v8.1: RACELINE 模式下, ego 接近对手时轻微降速.
+        防止高速冲向对手. 覆盖 gap>0 和 gap in [-5,0] 两种情况."""
+        ego_s = ego_state['s']
+        min_scale = speed_scale
+        for opp in opp_states:
+            gap = self._signed_gap(opp['s'], ego_s)
+            if gap < -5.0 or gap > 15.0:
+                continue
+            if gap < 0:
+                # ego 刚超过 opp, 距离很近, 降速防碰
+                abs_gap = abs(gap)
+                s = 0.7 + 0.3 * (abs_gap / 5.0)   # gap=0→0.7, gap=-5→1.0
+            elif gap < 5.0:
+                s = 0.7
+            elif gap < 12.0:
+                s = 0.7 + 0.3 * (gap - 5.0) / 7.0
+            else:
+                s = 1.0
+            min_scale = min(min_scale, s)
+        return min_scale
+
     def _apply_all_opp_safety(self, ego_state, opp_states, s_arr, t_arr,
                                w_left, w_right, max_v_node):
-        """v8: 对所有对手做安全排斥 — 防止任何模式下穿过非目标对手.
-        基于 ego 当前位置确定排斥方向, 排斥量 3.5m 最小."""
+        """v8.1: 对所有对手做安全排斥 — 防止任何模式下穿过非目标对手.
+        基于 ego 当前位置确定排斥方向, 排斥量 4.0m 最小.
+        v8.2: 急弯区域增加排斥量，补偿 Frenet→Cartesian 映射失真."""
         ego_n = ego_state.get('n', 0.0)
+        ego_s = ego_state.get('s', 0.0) % self.track_len
+
+        # ---- 曲率增强: 查询前方曲率 ----
+        s_look = np.linspace(ego_s, ego_s + 80.0, 25) % self.track_len
+        omega_vals = np.abs(np.interp(s_look, self.track_handler.s,
+                                       self.track_handler.Omega_z,
+                                       period=self.track_len))
+        max_curv = float(np.max(omega_vals))
+        curv_factor = float(np.clip((max_curv - 0.03) / 0.07, 0.0, 1.0))
+        # curv_factor: 0@curv<=0.03, 1@curv>=0.10
+
         for opp in opp_states:
             opp_s_pred, opp_n_pred = self._predict_opp(opp, t_arr, max_v_node)
             opp_n_now = opp.get('n', 0.0)
             ego_is_left = (ego_n > opp_n_now)
             for i in range(max_v_node):
                 ds_raw = self._signed_gap(opp_s_pred[i], s_arr[i])
-                if ds_raw < -10.0:  # 放宽: 也保护已超过的对手
+                if ds_raw < -10.0:
                     continue
                 ds_abs = abs(ds_raw)
                 if ds_abs >= 25.0:
                     continue
                 fade = self._cosine_fade(ds_abs, 25.0)
-                excl = max((self.opp_half_w + self.opp_clearance) * fade, 3.5)
+                # v8.2: 急弯增加排斥 3.5 → 5.5m
+                min_excl = 3.5 + curv_factor * 2.0
+                base_excl = max((self.opp_half_w + self.opp_clearance) * fade, min_excl)
                 if ego_is_left:
-                    new_r = opp_n_pred[i] + excl
+                    new_r = opp_n_pred[i] + base_excl
                     if new_r > w_right[i]:
                         w_right[i] = new_r
                 else:
-                    new_l = opp_n_pred[i] - excl
+                    new_l = opp_n_pred[i] - base_excl
                     if new_l < w_left[i]:
                         w_left[i] = new_l
 
@@ -743,6 +799,48 @@ class A2RLObstacleCarver:
         for i in range(N_stages):
             w_left[i] = min(w_left[i], w_l_base[i])
             w_right[i] = max(w_right[i], w_r_base[i])
+            width = w_left[i] - w_right[i]
+            if width < self.min_corridor:
+                c = (w_left[i] + w_right[i]) / 2.0
+                w_left[i] = c + self.min_corridor / 2.0
+                w_right[i] = c - self.min_corridor / 2.0
+        return w_left, w_right
+
+    def _ensure_ego_reachable(self, ego_state, w_left, w_right,
+                               w_l_base, w_r_base, N_stages):
+        """v8.1: 确保前几个规划节点的可行域包含 ego 当前 n 位置.
+        
+        如果 ego 当前位置在可行域外, planner 初始约束不可行 → 必然 fail.
+        解决: 将前 n_fix 个节点的可行域扩展到包含 ego 位置(留 margin).
+        然后用 cosine 过渡回原始边界, 不破坏远处的安全排斥.
+        """
+        ego_n = ego_state.get('n', 0.0)
+        margin = 1.0  # ego 两侧至少留 1m 空间
+        n_fix = min(8, N_stages)  # 前 8 个节点(约前 1s)做保护
+
+        needs_fix = False
+        for i in range(min(3, N_stages)):
+            if ego_n > w_left[i] - margin or ego_n < w_right[i] + margin:
+                needs_fix = True
+                break
+
+        if not needs_fix:
+            return w_left, w_right
+
+        for i in range(n_fix):
+            # 过渡因子: 前面完全保护, 逐渐过渡到原始值
+            alpha = 1.0 - (i / max(n_fix - 1, 1)) ** 2  # 二次衰减
+            needed_left = ego_n + margin
+            needed_right = ego_n - margin
+            # 仅在需要时扩展(不收紧)
+            if needed_left > w_left[i]:
+                w_left[i] = w_left[i] + alpha * (needed_left - w_left[i])
+            if needed_right < w_right[i]:
+                w_right[i] = w_right[i] + alpha * (needed_right - w_right[i])
+            # 仍然不能超过赛道物理边界
+            w_left[i] = min(w_left[i], w_l_base[i])
+            w_right[i] = max(w_right[i], w_r_base[i])
+            # 确保最小宽度
             width = w_left[i] - w_right[i]
             if width < self.min_corridor:
                 c = (w_left[i] + w_right[i]) / 2.0

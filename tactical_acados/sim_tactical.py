@@ -163,6 +163,8 @@ def run_tactical_simulation(
     print(f"  Policy: {policy_type}, Max steps: {max_steps}")
     print("=" * 70)
 
+    collision_count = 0
+
     for step in range(max_steps):
         t_start = time.time()
 
@@ -211,6 +213,7 @@ def run_tactical_simulation(
             'shadow': CarverMode.SHADOW,
             'overtake': CarverMode.OVERTAKE,
             'raceline': CarverMode.RACELINE,
+            'hold': CarverMode.HOLD,
         }
         c_mode = carver_mode_map.get(
             getattr(policy, 'carver_mode_str', 'follow'),
@@ -230,6 +233,7 @@ def run_tactical_simulation(
             shadow_side=c_side,
             overtake_side=c_side,
             prev_trajectory=planner._prev_trajectory,
+            planner_healthy=planner.planner_healthy,
         )
 
         # Merge carver guidance into tactical guidance
@@ -292,7 +296,7 @@ def run_tactical_simulation(
         debug_cycle = {
             'step': step,
             's': ego_state['s'],
-            'raw_tactic': getattr(policy, 'debug_info', {}).get('raw_tactic', 'N/A'),
+            'raw_tactic': action.discrete_tactic.name,
             'sanitized_tactic': action.discrete_tactic.name,
             'safe_set': getattr(policy, 'debug_info', {}).get('safe_set', []),
             'follow_mod': False,  # deprecated: carver handles follow now
@@ -325,16 +329,26 @@ def run_tactical_simulation(
         for opp in opponents:
             dist = np.sqrt((ego_state['x'] - opp.x) ** 2 + (ego_state['y'] - opp.y) ** 2)
             if dist < cfg.vehicle_length * 0.5:
-                print(f"\n*** COLLISION at step {step}! ***")
+                collision_count += 1
+                ds = ego_state['s'] - opp.s
+                print(f"  *** COLLISION step={step} with Opp{opp.vehicle_id}! "
+                      f"dist={dist:.2f} ego_s={ego_state['s']:.0f} "
+                      f"ego_n={ego_state['n']:.2f} opp_n={opp.n:.2f} ds={ds:.1f} ***")
 
         prev_action = action
 
-        if step % 20 == 0 or not planner.planner_healthy or debug_cycle['raw_tactic'] != debug_cycle['sanitized_tactic']:
-            opp_info = " | ".join([f"Opp{o.vehicle_id}: s={o.s:.0f}" for o in opponents])
+        if step % 20 == 0 or not planner.planner_healthy or debug_cycle['raw_tactic'] != debug_cycle['sanitized_tactic'] or (830 <= step <= 860):
+            # v3: show phase + gap + carver mode (like dual sim)
+            policy_phase = debug_cycle.get('policy_phase', 'N/A')
+            policy_gap = debug_cycle.get('policy_gap', None)
+            gap_str = f"gap={policy_gap:5.1f}" if policy_gap else "gap= N/A"
+            policy_target = debug_cycle.get('policy_target_id', '?')
+            opp_info = " | ".join([f"Opp{o.vehicle_id}: s={o.s:.0f} n={o.n:.1f} {o.tactic}" for o in opponents])
+            ot_rdy = " OT_RDY!" if debug_cycle.get('overtake_ready', False) else ""
             print(
                 f"[{step:4d}] s={ego_state['s']:7.1f} n={ego_state['n']:5.2f} "
-                f"V={ego_state['V']:5.1f} | {action.discrete_tactic.name:20s} "
-                f"α={action.aggressiveness:.2f} | {opp_info} | "
+                f"V={ego_state['V']:5.1f} | {policy_phase:10s} {gap_str} tgt={policy_target}"
+                f"{ot_rdy} | {c_mode.name:8s} {c_side or '':5s} | {opp_info} | "
                 f"{t_plan*1000:.0f}ms"
             )
             # Log special heuristic discrepancies or errors
@@ -346,7 +360,7 @@ def run_tactical_simulation(
                       f"min_w={debug_cycle['min_w']:.2f} err={debug_cycle['exception']}")
 
     planner_success_rate = sum(log['planner_ok']) / max(len(log['planner_ok']), 1) * 100
-    print(f"\nDone: {len(log['step'])} steps, planner OK {planner_success_rate:.1f}%")
+    print(f"\nDone: {len(log['step'])} steps, planner OK {planner_success_rate:.1f}%, collisions {collision_count}")
 
     return log
 
