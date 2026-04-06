@@ -114,6 +114,7 @@ def run_sim(scenario_name, max_steps=600):
         'ego_x': [], 'ego_y': [],
         'phase': [], 'carver_mode': [], 'locked_side': [],
         'corridor_left': [], 'corridor_right': [],
+        'corridor_s_full': [], 'corridor_left_full': [], 'corridor_right_full': [],
         'track_left': [], 'track_right': [],
     }
     for oc in opp_cfgs:
@@ -195,6 +196,15 @@ def run_sim(scenario_name, max_steps=600):
         if cg.n_left_override is not None:
             rec['corridor_left'].append(float(cg.n_left_override[0]))
             rec['corridor_right'].append(float(cg.n_right_override[0]))
+            # Full N-step corridor for precise visualization
+            ds = cfg.optimization_horizon_m / cfg.N_steps_acados
+            s_arr_corr = np.array([ego_state['s'] + i * ds
+                                   for i in range(len(cg.n_left_override))])
+            rec['corridor_s_full'].append(s_arr_corr.copy())
+            rec['corridor_left_full'].append(
+                np.array(cg.n_left_override, dtype=float).copy())
+            rec['corridor_right_full'].append(
+                np.array(cg.n_right_override, dtype=float).copy())
         else:
             s_w = ego_state['s'] % track_len
             wl = float(np.interp(s_w, track_handler.s,
@@ -203,6 +213,9 @@ def run_sim(scenario_name, max_steps=600):
                                   track_handler.w_tr_right, period=track_len))
             rec['corridor_left'].append(wl)
             rec['corridor_right'].append(wr)
+            rec['corridor_s_full'].append(None)
+            rec['corridor_left_full'].append(None)
+            rec['corridor_right_full'].append(None)
 
         s_w = ego_state['s'] % track_len
         rec['track_left'].append(float(np.interp(
