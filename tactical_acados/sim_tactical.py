@@ -379,7 +379,7 @@ def run_tactical_simulation(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Tactical Simulation')
-    parser.add_argument('--scenario', type=str, default='scenario_b', help='scenario_a, scenario_b, scenario_c')
+    parser.add_argument('--scenario', type=str, default='scenario_c', help='scenario_a, scenario_b, scenario_c')
     _ALL_POLICIES = ['ours', 'no_tactical', 'game_theory', 'A-oursrl', 'oursrl', 'pure-rl',
                       'heuristic', 'random', 'rl']  # heuristic/rl are legacy aliases
     parser.add_argument('--policy', type=str, default='ours',

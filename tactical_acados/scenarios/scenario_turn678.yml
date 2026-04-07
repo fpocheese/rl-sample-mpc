@@ -1,0 +1,38 @@
+# Scenario: Turn 6-7 Overtaking (Paper Figure) — v2
+# 
+# Turn 6 apex ≈ 2544 (sharp LEFT, Ω=+0.10, V≈21 m/s)
+# Turn 7 apex ≈ 2610 (LEFT, Ω=+0.047, V≈27 m/s)
+#
+# LOCAL SEGMENT ONLY: s ∈ [2300, 2720]
+# ego starts ~40m behind opponent on straight before T6 braking zone.
+# Target: overtake happens near T6 apex (s≈2544).
+# Simulation ends after T7 exit, before T8.
+
+scenario:
+  name: "Paper Turn 6-7 Overtake"
+  track_name: "yas_user_smoothed"
+  vehicle_name: "eav25_car"
+  raceline_name: "yasnorth_3d_rl_as_ref_eav25_car_gg_0.1"
+  s_start: 2300.0
+  s_end: 2720.0       # stop after T7 exit, before T8 (apex 2740)
+
+ego:
+  start_s: 2320.0
+  start_n: 0.0        # on centreline (straight section)
+  start_V: 45.0       # SAFE start speed (ACADOS won't fail)
+  start_chi: 0.0
+  start_ax: 0.0
+  start_ay: 0.0
+
+opponents:
+  - id: 1
+    start_s: 2355.0   # ~35m ahead of ego
+    start_n: 0.0       # on centreline
+    start_V: 38.0      # 0.80 * ~47.5
+    speed_scale: 0.80  # slower opponent → ego will catch up
+
+planner:
+  optimization_horizon_m: 300.0
+  gg_margin: 0.1
+  safety_distance: 0.5
+  assumed_calc_time: 0.125

@@ -17,15 +17,15 @@ ego:
 
 opponents:
   - id: 1
-    start_s: 120.0
+    start_s: 80.0
     start_n: 0.2
     start_V: 44.0
-    speed_scale: 0.87
+    speed_scale: 0.90
   - id: 2
     start_s: 250.0
     start_n: -0.3
     start_V: 42.0
-    speed_scale: 0.83
+    speed_scale: 0.85
 
 planner:
   optimization_horizon_m: 300.0

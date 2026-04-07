@@ -90,7 +90,7 @@ class TacticalConfig:
 
     # ---- Vehicle (loaded from YAML, but defaults for dallaraAV21) ----
     vehicle_width: float = 1.93
-    vehicle_length: float = 4.9
+    vehicle_length: float = 5.30
 
     # ---- Follow module ----
     follow_gap_default: float = 6.0       # desired following gap [m], enough to allow pulling out (抽头超车)

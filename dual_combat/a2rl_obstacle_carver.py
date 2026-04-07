@@ -75,9 +75,16 @@ class A2RLObstacleCarver:
         self.w_l_offset = -0.7
         self.w_r_offset = +1.5
 
-        # common
-        self.opp_half_w         = 1.5     # v5: wider exclusion (was 1.2)
-        self.opp_clearance      = 2.5     # v5: more clearance (was 2.0)
+        # Vehicle geometry (from config, assuming opponent = same vehicle)
+        self.opp_half_w         = cfg.vehicle_width / 2.0   # 0.965m
+        self.opp_half_l         = cfg.vehicle_length / 2.0   # 2.65m
+        self.ego_half_w         = cfg.vehicle_width / 2.0    # 0.965m
+        self.ego_half_l         = cfg.vehicle_length / 2.0   # 2.65m
+        # Safety clearance (pure margin beyond vehicle extents)
+        self.lateral_safety     = 2.0     # lateral safety gap [m]
+        # Effective exclusion = opp_half_w + ego_half_w + lateral_safety
+        #                     = 0.965 + 0.965 + 2.0 ≈ 3.93m (was 4.0m)
+        self.opp_clearance      = self.ego_half_w + self.lateral_safety
         self.min_corridor       = 3.0     # v5: ACADOS needs vw/2+safety each side ≈ 1.5 each
         self.smooth_kernel_size = 5       # v5: reduced smoothing (was 11) to preserve exclusion
         self.safety_s           = 60.0

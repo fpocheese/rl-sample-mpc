@@ -45,7 +45,7 @@ class GameTheoryPolicy:
         self.curv_threshold = 0.008       # only OT on straights
         self.lateral_space_min = 5.0      # need 5m lateral space
         self.abort_gap = 20.0
-        self.ego_ahead_margin = 5.0       # conservative ahead threshold
+        self.ego_ahead_margin = cfg.vehicle_length  # ego passed opp by one car length
 
         self._carver_mode_str = 'follow'
         self._carver_side = None

@@ -59,7 +59,7 @@ class HeuristicTacticalPolicy:
         self.abort_gap = 25.0           # gap > 25 -> abort OT
         self.hold_duration = 40         # v9: shorter hold (~5s) for quick retry
         self.curv_straight = 0.012      # straight threshold
-        self.ego_ahead_margin = 3.0
+        self.ego_ahead_margin = cfg.vehicle_length  # 4.9m: ego passed opp by one car length
 
         # ---- Carver mode output ----
         self._carver_mode_str = 'raceline'
