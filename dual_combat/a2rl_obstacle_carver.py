@@ -75,9 +75,18 @@ class A2RLObstacleCarver:
         self.w_l_offset = -0.7
         self.w_r_offset = +1.5
 
-        # common
-        self.opp_half_w         = 1.5     # v5: wider exclusion (was 1.2)
-        self.opp_clearance      = 2.5     # v5: more clearance (was 2.0)
+        # common — vehicle geometry from config
+        self.opp_half_w         = cfg.vehicle_width / 2.0   # 0.965m
+        self.opp_half_l         = cfg.vehicle_length / 2.0  # 2.65m
+        self.ego_half_w         = cfg.vehicle_width / 2.0   # 0.965m
+        self.ego_half_l         = cfg.vehicle_length / 2.0  # 2.65m
+        # Safety clearance (pure margin beyond vehicle extents)
+        self.lateral_safety     = 2.0     # lateral safety gap [m]
+        # Effective exclusion = opp_half_w + ego_half_w + lateral_safety
+        #                     = 0.965 + 0.965 + 2.0 ≈ 3.93m (was 4.0m)
+        self.opp_clearance      = self.ego_half_w + self.lateral_safety
+        # Behind-ignore distance: opponent already well behind ego
+        self.behind_ignore_s    = self.opp_half_l + self.ego_half_l + 1.0  # ≈6.3m
         self.min_corridor       = 3.0     # v5: ACADOS needs vw/2+safety each side ≈ 1.5 each
         self.smooth_kernel_size = 5       # v5: reduced smoothing (was 11) to preserve exclusion
         self.safety_s           = 60.0
@@ -289,7 +298,7 @@ class A2RLObstacleCarver:
             closest_node, closest_gap = -1, 999.0
             for i in range(max_v_node):
                 gap = self._signed_gap(opp_s_nodes[i], s_arr[i])
-                if gap < -4.0:
+                if gap < -self.behind_ignore_s:
                     continue
                 if abs(gap) < closest_gap:
                     closest_gap = abs(gap)
@@ -319,7 +328,7 @@ class A2RLObstacleCarver:
                 else:
                     use_opp_n = opp_n_nodes[i]
                     use_ds_raw = ds_raw
-                if use_ds_raw < -8.0:
+                if use_ds_raw < -self.behind_ignore_s:
                     continue
                 ds_abs = abs(use_ds_raw)
                 if ds_abs >= self.safety_s:
@@ -398,7 +407,7 @@ class A2RLObstacleCarver:
             opp_s_pred = opp_s_traj[i]
             opp_n_pred = opp_n_traj[i]
             ds_raw = self._signed_gap(opp_s_pred, s_arr[i])
-            if ds_raw < -4.0:
+            if ds_raw < -self.behind_ignore_s:
                 continue
             ds_abs = abs(ds_raw)
             if ds_abs >= self.safety_s:
@@ -441,7 +450,7 @@ class A2RLObstacleCarver:
             opp_s_pred = opp_s_traj[i]
             opp_n_pred = opp_n_traj[i]
             ds_raw = self._signed_gap(opp_s_pred, s_arr[i])
-            if ds_raw < -4.0:
+            if ds_raw < -self.behind_ignore_s:
                 continue
             ds_abs = abs(ds_raw)
             if ds_abs >= self.safety_s:

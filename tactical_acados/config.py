@@ -88,9 +88,9 @@ class TacticalConfig:
     corridor_safety_margin: float = 1.0   # meters around opponent
     overtake_min_corridor: float = 2.5    # minimum corridor width for overtake [m]
 
-    # ---- Vehicle (loaded from YAML, but defaults for dallaraAV21) ----
+    # ---- Vehicle (loaded from YAML, but defaults for dallaraAV21 / eav25_car) ----
     vehicle_width: float = 1.93
-    vehicle_length: float = 4.9
+    vehicle_length: float = 5.30
 
     # ---- Follow module ----
     follow_gap_default: float = 6.0       # desired following gap [m], enough to allow pulling out (抽头超车)
