@@ -1,0 +1,78 @@
+{
+  "stats": {
+    "no_tactical": {
+      "n_runs": 80,
+      "collision_rate": 31.25,
+      "overtake_rate": 47.5,
+      "avg_overtakes": 0.475,
+      "avg_speed": 43.47424868863201,
+      "std_speed": 6.671112745901794,
+      "min_gap_mean": 13.235231031848178,
+      "min_gap_std": 14.370096652233686
+    },
+    "game_theory": {
+      "n_runs": 80,
+      "collision_rate": 15.0,
+      "overtake_rate": 7.5,
+      "avg_overtakes": 0.075,
+      "avg_speed": 41.13437152573313,
+      "std_speed": 6.226752597904363,
+      "min_gap_mean": 15.979112883041159,
+      "min_gap_std": 12.70147417596865
+    },
+    "ours": {
+      "n_runs": 80,
+      "collision_rate": 11.25,
+      "overtake_rate": 10.0,
+      "avg_overtakes": 0.1,
+      "avg_speed": 41.3128528832048,
+      "std_speed": 6.225926945119926,
+      "min_gap_mean": 15.792083672747998,
+      "min_gap_std": 12.793974481099841
+    },
+    "A-oursrl": {
+      "n_runs": 80,
+      "collision_rate": 7.5,
+      "overtake_rate": 12.5,
+      "avg_overtakes": 0.125,
+      "avg_speed": 40.470677560457695,
+      "std_speed": 5.596624889359694,
+      "min_gap_mean": 18.982106405099195,
+      "min_gap_std": 12.17145100790526
+    },
+    "oursrl": {
+      "n_runs": 80,
+      "collision_rate": 1.25,
+      "overtake_rate": 0.0,
+      "avg_overtakes": 0.0,
+      "avg_speed": 37.6805175319714,
+      "std_speed": 5.9711301977362625,
+      "min_gap_mean": 22.5577139886395,
+      "min_gap_std": 11.326732404936942
+    },
+    "pure-rl": {
+      "n_runs": 80,
+      "collision_rate": 2.5,
+      "overtake_rate": 2.5,
+      "avg_overtakes": 0.025,
+      "avg_speed": 38.50838270267026,
+      "std_speed": 6.743854347176513,
+      "min_gap_mean": 21.386026738849274,
+      "min_gap_std": 11.763115428558262
+    }
+  },
+  "config": {
+    "seeds": 10,
+    "max_steps": 800,
+    "n_scenarios": 8,
+    "policies": [
+      "no_tactical",
+      "game_theory",
+      "ours",
+      "A-oursrl",
+      "oursrl",
+      "pure-rl"
+    ]
+  },
+  "elapsed_seconds": 2932.2314236164093
+}

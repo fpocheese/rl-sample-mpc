@@ -145,3 +145,6 @@ tactical_acados/checkpoints/
 tactical_acados/**/tensorboard_logs/
 tactical_acados/**/runs/
 tactical_acados/**/wandb/
+tactical_acados/rl/Untitled.txt
+tactical_acados/benchmark_rl_results/*_stdout.log
+tactical_acados/benchmark_rl_results/*_stderr.log

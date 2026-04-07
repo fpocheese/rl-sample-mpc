@@ -1,0 +1,20 @@
+\begin{table*}[htbp]
+\centering
+\caption{Per-scenario comparison of collision rate (\%) and overtake rate (\%)}
+\label{tab:per_scenario}
+\begin{tabular}{lcccccccccccc}
+\toprule
+Scenario & \multicolumn{2}{c}{No Tactical (MPC)} & \multicolumn{2}{c}{Game Theory} & \multicolumn{2}{c}{Ours (Heuristic)} & \multicolumn{2}{c}{A-Ours+RL} & \multicolumn{2}{c}{Ours+RL} & \multicolumn{2}{c}{Pure RL} \\
+ & Col\% & OT\% & Col\% & OT\% & Col\% & OT\% & Col\% & OT\% & Col\% & OT\% & Col\% & OT\% \\
+\midrule
+S1_Straight & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+S2_Turn23 & 70 & 100 & 100 & 60 & 60 & 70 & 0 & 0 & 0 & 0 & 0 & 0 \\
+S3_Hairpin & 0 & 20 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+S4_Scurve & 70 & 90 & 10 & 0 & 10 & 10 & 0 & 30 & 0 & 0 & 0 & 0 \\
+S5_Exit & 40 & 60 & 0 & 0 & 0 & 0 & 40 & 40 & 10 & 0 & 10 & 20 \\
+S6_FastOpp & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+S7_MultiTurn & 20 & 10 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+S8_CloseGap & 50 & 100 & 10 & 0 & 20 & 0 & 20 & 30 & 0 & 0 & 10 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table*}

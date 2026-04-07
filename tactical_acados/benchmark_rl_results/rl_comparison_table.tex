@@ -1,0 +1,17 @@
+\begin{table}[htbp]
+\centering
+\caption{Statistical comparison across 8 scenarios with 10 seeds}
+\label{tab:rl_comparison}
+\begin{tabular}{lcccccc}
+\toprule
+Method & Runs & Collision\% & OT\% & $\bar{V}$ (m/s) & Min Gap (m) \\
+\midrule
+No Tactical (MPC) & 80 & 31.2 & 47.5 & 43.5$\pm$6.7 & 13.24$\pm$14.37 \\
+Game Theory & 80 & 15.0 & 7.5 & 41.1$\pm$6.2 & 15.98$\pm$12.70 \\
+Ours (Heuristic) & 80 & 11.2 & 10.0 & 41.3$\pm$6.2 & 15.79$\pm$12.79 \\
+A-Ours+RL & 80 & 7.5 & 12.5 & 40.5$\pm$5.6 & 18.98$\pm$12.17 \\
+Ours+RL & 80 & 1.2 & 0.0 & 37.7$\pm$6.0 & 22.56$\pm$11.33 \\
+Pure RL & 80 & 2.5 & 2.5 & 38.5$\pm$6.7 & 21.39$\pm$11.76 \\
+\bottomrule
+\end{tabular}
+\end{table}
