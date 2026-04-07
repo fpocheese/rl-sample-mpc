@@ -95,20 +95,31 @@ def run_tactical_simulation(
     # A2RL obstacle carver (v3: cosine funnel multi-mode)
     a2rl_carver = A2RLObstacleCarver(track_handler, cfg, global_planner=global_planner)
 
-    # Policy
-    if policy_type == 'heuristic':
+    # Policy -- supports all 6 benchmark variants + random
+    # Aliases:  ours == heuristic
+    _policy_alias = {'heuristic': 'ours', 'rl': 'A-oursrl'}
+    policy_key = _policy_alias.get(policy_type, policy_type)
+
+    if policy_key == 'ours':
         from policies.heuristic_policy import HeuristicTacticalPolicy
         policy = HeuristicTacticalPolicy(cfg)
-    elif policy_type == 'rl':
-        from policies.rl_policy import RLTacticalPolicy
-        model_path = os.path.join(dir_path, 'checkpoints', 'best_policy.pt')
-        policy = RLTacticalPolicy(model_path, cfg)
-    elif policy_type == 'random':
+    elif policy_key == 'no_tactical':
+        from policies.baseline_no_tactical import NoTacticalPolicy
+        policy = NoTacticalPolicy(cfg)
+    elif policy_key == 'game_theory':
+        from policies.baseline_game_theory import GameTheoryPolicy
+        policy = GameTheoryPolicy(cfg)
+    elif policy_key in ('A-oursrl', 'oursrl', 'pure-rl'):
+        from policies.rl_policy import load_rl_policy
+        policy = load_rl_policy(policy_key, cfg=cfg)
+    elif policy_key == 'random':
         from policies.random_policy import RandomTacticalPolicy
         policy = RandomTacticalPolicy(cfg)
     else:
-        from policies.heuristic_policy import HeuristicTacticalPolicy
-        policy = HeuristicTacticalPolicy(cfg)
+        raise ValueError(
+            f"Unknown policy '{policy_type}'. Choose from: "
+            f"ours, no_tactical, game_theory, A-oursrl, oursrl, pure-rl, random"
+        )
 
     # Initial ego state
     ego_state = create_initial_state(
@@ -369,7 +380,12 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Tactical Simulation')
     parser.add_argument('--scenario', type=str, default='scenario_b', help='scenario_a, scenario_b, scenario_c')
-    parser.add_argument('--policy', type=str, default='heuristic', choices=['heuristic', 'random', 'rl'], help='Tactical policy type')
+    _ALL_POLICIES = ['ours', 'no_tactical', 'game_theory', 'A-oursrl', 'oursrl', 'pure-rl',
+                      'heuristic', 'random', 'rl']  # heuristic/rl are legacy aliases
+    parser.add_argument('--policy', type=str, default='ours',
+                        choices=_ALL_POLICIES,
+                        help='Tactical policy: ours | no_tactical | game_theory | '
+                             'A-oursrl | oursrl | pure-rl | random')
     parser.add_argument('--max-steps', type=int, default=99999, help='Maximum simulation steps')
     parser.add_argument('--no-viz', action='store_true', help='Disable visualization')
     args = parser.parse_args()
