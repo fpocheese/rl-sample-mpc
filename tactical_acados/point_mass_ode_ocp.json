@@ -16,7 +16,7 @@
         "code_export_directory": "/home/uav/11gsytset/0A_LYX_CODE/SAMPLE_local_paper/sampling_based_3D_local_planning/tactical_acados/c_generated_code",
         "cython_include_dirs": [
             "/home/uav/.local/lib/python3.10/site-packages/numpy/core/include",
-            "/usr/include/python3.10"
+            "/home/uav/anaconda3/envs/a2rldet/include/python3.10"
         ],
         "json_file": "point_mass_ode_ocp.json",
         "os": "unix",
@@ -327,7 +327,7 @@
         "point_mass_ode_cost/point_mass_ode_cost_ext_cost_fun_jac_hess.c",
         "point_mass_ode_cost/point_mass_ode_cost_ext_cost_fun_jac.c"
     ],
-    "hash": "e91cbea54378c3cda8b633bf315610f9",
+    "hash": "3b5f814bc50b309d4f7a1a04b39d8d6e",
     "model": {
         "con_h_expr": "MX(@1=(V*sin(chi)), @2=omega_x(s){0}, @3=omega_z(s){0}, @4=((V*cos(chi))/(1-(n*@3))), @5=mu(s){0}, @6=phi(s){0}, @7=acc_interpolator(vertcat(V, fmax(((((((@1*@2)*@4)+((n*domega_x(s){0})*sq(@4)))+((n*@2)*(((((ax*cos(chi))-((V*sin(chi))*((ay/V)-(@3*@4))))*(1-(n*@3)))-((V*cos(chi))*((-(@1*@3))-((n*domega_z(s){0})*@4))))/((1+((2.*n)*@3))+(sq(n)*sq(@3))))))-((((omega_y(s){0}*cos(chi))-(@2*sin(chi)))*@4)*V))+((9.81*cos(@5))*cos(@6))),0))){0}, @8=(ax+(9.81*(((cos(@5)*sin(@6))*sin(chi))-(sin(@5)*cos(chi))))), @9=@7[3], @10=(ay+(9.81*((sin(@5)*sin(chi))+((cos(@5)*sin(@6))*cos(chi))))), @11=@7[0], vertcat((@7[2]-@8), (@9-fabs(@10)), ((fabs(@7[1])*pow(fmax((1-pow(fmin((fabs(@10)/@9),1),@11)),0.001),(1./@11)))-fabs(@8))))",
         "con_h_expr_0": [],

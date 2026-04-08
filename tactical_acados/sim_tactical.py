@@ -53,8 +53,21 @@ def run_tactical_simulation(
         max_steps: int = 999999,
         visualize: bool = True,
         policy_type: str = 'heuristic',
+        force_side: str = None,
+        follow_when_forced: bool = True,
 ):
-    """Run full tactical 3-car simulation."""
+    """Run full tactical 3-car simulation.
+
+    Parameters
+    ----------
+    force_side : None | 'left' | 'right'
+        When set with policy_type='heuristic', the ego will hug the
+        specified track boundary instead of the normal FSM raceline.
+    follow_when_forced : bool
+        Only used when ``force_side`` is set.
+        True  -> slow down / avoid opponents.
+        False -> completely ignore opponents.
+    """
 
     # Load scenario
     scenario = load_scenario(scenario_name)
@@ -98,7 +111,9 @@ def run_tactical_simulation(
     # Policy
     if policy_type == 'heuristic':
         from policies.heuristic_policy import HeuristicTacticalPolicy
-        policy = HeuristicTacticalPolicy(cfg)
+        policy = HeuristicTacticalPolicy(
+            cfg, force_side=force_side,
+            follow_when_forced=follow_when_forced)
     elif policy_type == 'rl':
         from policies.rl_policy import RLTacticalPolicy
         model_path = os.path.join(dir_path, 'checkpoints', 'best_policy.pt')
@@ -214,6 +229,8 @@ def run_tactical_simulation(
             'overtake': CarverMode.OVERTAKE,
             'raceline': CarverMode.RACELINE,
             'hold': CarverMode.HOLD,
+            'force_left': CarverMode.FORCE_LEFT,
+            'force_right': CarverMode.FORCE_RIGHT,
         }
         c_mode = carver_mode_map.get(
             getattr(policy, 'carver_mode_str', 'follow'),
@@ -223,6 +240,9 @@ def run_tactical_simulation(
 
         horizon_m = cfg.optimization_horizon_m
         ds = horizon_m / cfg.N_steps_acados
+
+        # Determine whether carver should respect opponents
+        follow_opps = getattr(policy, 'follow_when_forced', True)
 
         carver_guidance = a2rl_carver.construct_guidance(
             ego_state,
@@ -234,6 +254,7 @@ def run_tactical_simulation(
             overtake_side=c_side,
             prev_trajectory=planner._prev_trajectory,
             planner_healthy=planner.planner_healthy,
+            follow_opponents=follow_opps,
         )
 
         # Merge carver guidance into tactical guidance
@@ -368,15 +389,28 @@ def run_tactical_simulation(
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Tactical Simulation')
-    parser.add_argument('--scenario', type=str, default='scenario_b', help='scenario_a, scenario_b, scenario_c')
+    parser.add_argument('--scenario', type=str, default='scenario_c', help='scenario_a, scenario_b, scenario_c')
     parser.add_argument('--policy', type=str, default='heuristic', choices=['heuristic', 'random', 'rl'], help='Tactical policy type')
     parser.add_argument('--max-steps', type=int, default=99999, help='Maximum simulation steps')
     parser.add_argument('--no-viz', action='store_true', help='Disable visualization')
+    parser.add_argument('--force-side', type=str, default=None, choices=['left', 'right'],
+                        help='Force ego to hug left or right track boundary (heuristic policy only)')
+    parser.add_argument('--follow-when-forced', action='store_true', default=True,
+                        help='When --force-side is set, slow down / avoid opponents (default: True)')
+    parser.add_argument('--no-follow-when-forced', action='store_true',
+                        help='When --force-side is set, completely ignore opponents')
     args = parser.parse_args()
+
+    # Resolve follow flag
+    _follow = True
+    if args.no_follow_when_forced:
+        _follow = False
 
     run_tactical_simulation(
         scenario_name=args.scenario,
         max_steps=args.max_steps,
         visualize=not args.no_viz,
         policy_type=args.policy,
+        force_side=args.force_side,
+        follow_when_forced=_follow,
     )

@@ -30,9 +30,28 @@ from config import TacticalConfig, DEFAULT_CONFIG
 class HeuristicTacticalPolicy:
     """Stateful heuristic tactical policy v9."""
 
-    def __init__(self, cfg: TacticalConfig = DEFAULT_CONFIG):
+    def __init__(self, cfg: TacticalConfig = DEFAULT_CONFIG,
+                 force_side: str = None,
+                 follow_when_forced: bool = True):
+        """
+        Parameters
+        ----------
+        cfg : TacticalConfig
+        force_side : None | 'left' | 'right'
+            When set, the ego will hug the specified track boundary
+            instead of running the normal FSM logic.  The transition
+            from the current position is handled smoothly by the carver.
+        follow_when_forced : bool
+            Only used when ``force_side`` is set.
+            True  -> slow down and avoid opponents (follow behaviour).
+            False -> completely ignore opponents (pure side-hug).
+        """
         self.cfg = cfg
         self.dt = float(cfg.assumed_calc_time)
+
+        # ---- Force-side override (does NOT disturb normal FSM) ----
+        self._force_side: str = force_side        # None | 'left' | 'right'
+        self._follow_when_forced: bool = follow_when_forced
 
         # ---- FSM state ----
         self.phase: str = "RACELINE"
@@ -67,6 +86,27 @@ class HeuristicTacticalPolicy:
 
         # ---- Debug ----
         self.debug_info = {}
+
+    # ------------------------------------------------------------------
+    # Force-side runtime control
+    # ------------------------------------------------------------------
+    @property
+    def force_side(self) -> Optional[str]:
+        return self._force_side
+
+    @force_side.setter
+    def force_side(self, value: Optional[str]):
+        """Set to 'left', 'right', or None (disable) at runtime."""
+        assert value in (None, 'left', 'right'), f"Invalid force_side: {value}"
+        self._force_side = value
+
+    @property
+    def follow_when_forced(self) -> bool:
+        return self._follow_when_forced
+
+    @follow_when_forced.setter
+    def follow_when_forced(self, value: bool):
+        self._follow_when_forced = bool(value)
 
     # ------------------------------------------------------------------
     @property
@@ -222,6 +262,15 @@ class HeuristicTacticalPolicy:
     # Carver mode mapping
     # ------------------------------------------------------------------
     def _update_carver_output(self):
+        # Force-side override takes priority but does NOT touch FSM state
+        if self._force_side is not None:
+            if self._force_side == 'left':
+                self._carver_mode_str = 'force_left'
+            else:
+                self._carver_mode_str = 'force_right'
+            self._carver_side = self._force_side
+            return
+
         if self.phase == "RACELINE":
             self._carver_mode_str = 'raceline'
             self._carver_side = None

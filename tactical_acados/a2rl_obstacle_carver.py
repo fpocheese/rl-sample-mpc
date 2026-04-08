@@ -26,11 +26,13 @@ from tactical_action import PlannerGuidance
 
 
 class CarverMode(Enum):
-    OVERTAKE = auto()
-    FOLLOW   = auto()
-    SHADOW   = auto()
-    HOLD     = auto()
-    RACELINE = auto()
+    OVERTAKE    = auto()
+    FOLLOW      = auto()
+    SHADOW      = auto()
+    HOLD        = auto()
+    RACELINE    = auto()
+    FORCE_LEFT  = auto()
+    FORCE_RIGHT = auto()
 
 
 class GapPID:
@@ -146,7 +148,7 @@ class A2RLObstacleCarver:
     def construct_guidance(self, ego_state, opp_states, N_stages, ds,
                            mode=None, shadow_side=None, overtake_side=None,
                            prev_trajectory=None, target_opp_id=None,
-                           planner_healthy=True):
+                           planner_healthy=True, follow_opponents=True):
         if mode is None:
             mode = CarverMode.OVERTAKE
 
@@ -212,6 +214,12 @@ class A2RLObstacleCarver:
             speed_cap, speed_scale = self._mode_raceline(
                 ego_state, s_arr, s_wrapped,
                 w_left, w_right, w_l_base, w_r_base, N_stages)
+        elif mode in (CarverMode.FORCE_LEFT, CarverMode.FORCE_RIGHT):
+            force_side = 'left' if mode == CarverMode.FORCE_LEFT else 'right'
+            speed_cap, speed_scale = self._mode_force_side(
+                ego_state, opp_states, s_arr, s_wrapped, t_arr,
+                w_left, w_right, w_l_base, w_r_base,
+                max_v_node, N_stages, force_side, follow_opponents)
         else:  # OVERTAKE
             side = overtake_side if overtake_side else self._decide_overtake_side(
                 ego_state, opp_states)
@@ -525,6 +533,103 @@ class A2RLObstacleCarver:
             corridor_half = self.raceline_funnel_half + (1.0 - fade) * 8.0
             w_left[i] = min(w_left[i], rl_n[i] + corridor_half)
             w_right[i] = max(w_right[i], rl_n[i] - corridor_half)
+
+        return speed_cap, speed_scale
+
+    # ==================================================================
+    # FORCE_LEFT / FORCE_RIGHT -- hug track boundary
+    # ==================================================================
+    def _mode_force_side(self, ego_state, opp_states, s_arr, s_wrapped,
+                         t_arr, w_left, w_right, w_l_base, w_r_base,
+                         max_v_node, N_stages, force_side,
+                         follow_opponents=True):
+        """
+        Drive along the left or right side of the track.
+
+        The target lateral position is a fraction of the track boundary,
+        leaving a vehicle-width margin from the wall.  A cosine ramp
+        smoothly converges the corridor from the current ego position to
+        the target over ``raceline_convergence`` metres.
+
+        If ``follow_opponents`` is True, opponent exclusion zones are
+        overlaid so the ego will slow down / avoid opponents.
+        If False, opponents are completely ignored.
+        """
+        speed_cap = self.V_max
+        speed_scale = 1.0
+
+        wall_margin = self.cfg.vehicle_width / 2.0 + 0.5  # half-car + 0.5m buffer
+
+        ds_per_node = (s_arr[1] - s_arr[0]) if N_stages > 1 else 2.0
+
+        for i in range(N_stages):
+            left_bound = w_l_base[i]
+            right_bound = w_r_base[i]
+
+            if force_side == 'left':
+                target_n = left_bound - wall_margin
+            else:
+                target_n = right_bound + wall_margin
+
+            # Smooth convergence ramp (same as raceline mode)
+            ds_from_ego = i * ds_per_node
+            if ds_from_ego >= self.raceline_convergence:
+                fade = 1.0
+            else:
+                fade = self._cosine_fade(
+                    self.raceline_convergence - ds_from_ego,
+                    self.raceline_convergence)
+            fade *= self._startup_ramp(i)
+
+            corridor_half = self.raceline_funnel_half + (1.0 - fade) * 8.0
+            w_left[i] = min(w_left[i], target_n + corridor_half)
+            w_right[i] = max(w_right[i], target_n - corridor_half)
+
+        # ---- Optional: overlay opponent exclusion (follow / avoid) ----
+        if follow_opponents and opp_states:
+            target = self._find_target(ego_state, opp_states)
+            if target is not None:
+                leader_V = target.get('V', 30.0)
+                opp_s_traj, opp_n_traj = self._predict_opp(
+                    target, t_arr, max_v_node)
+                gap_current = self._signed_gap(target['s'], ego_state['s'])
+
+                # PID speed match to closest opponent ahead
+                if gap_current > 0:
+                    speed_cmd = self._follow_pid.compute(
+                        self.follow_gap_target, gap_current, leader_V)
+                    speed_scale = float(np.clip(
+                        speed_cmd / max(self.V_max, 1.0), 0.65, 1.0))
+
+            # Exclusion zones for ALL opponents
+            ego_n_now = ego_state.get('n', 0.0)
+            for opp in opp_states:
+                opp_s_pred, opp_n_pred = self._predict_opp(
+                    opp, t_arr, max_v_node)
+                opp_n_now = opp.get('n', 0.0)
+                ego_is_left = (ego_n_now > opp_n_now)
+                for i in range(max_v_node):
+                    ds_raw = self._signed_gap(opp_s_pred[i], s_arr[i])
+                    if ds_raw < -self.behind_ignore_s:
+                        continue
+                    ds_abs = abs(ds_raw)
+                    if ds_abs >= self.safety_s:
+                        continue
+                    fade = self._cosine_fade(ds_abs, self.safety_s)
+                    fade *= self._startup_ramp(i)
+                    excl = (self.opp_half_w + self.opp_clearance) * fade
+                    if ds_abs < 15.0:
+                        s_node = s_arr[i] % self.track_len
+                        local_curv = abs(float(np.interp(
+                            s_node, self.track_handler.s,
+                            self.track_handler.Omega_z,
+                            period=self.track_len)))
+                        curv_extra = min(local_curv / 0.05, 1.0) * 1.0
+                        excl = max(excl, self.overtake_excl_min + curv_extra)
+                    if ego_is_left:
+                        w_right[i] = max(w_right[i], opp_n_pred[i] + excl)
+                    else:
+                        w_left[i] = min(w_left[i], opp_n_pred[i] - excl)
 
         return speed_cap, speed_scale
 
