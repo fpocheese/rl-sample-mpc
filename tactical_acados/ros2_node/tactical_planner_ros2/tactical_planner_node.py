@@ -1,0 +1,682 @@
+"""
+Tactical Planner ROS2 Node
+===========================
+
+Wraps the tactical (heuristic / RL) planner into a ROS2 lifecycle-aware
+node that integrates with the A2RL planner_cvxopt framework.
+
+Subscriptions
+-------------
+- /flyeagle/a2rl/observer/ego_loc      (a2rl_bs_msgs/Localization)
+- /flyeagle/a2rl/observer/ego_state    (a2rl_bs_msgs/EgoState)
+- flyeagle/v2v_ground_truth            (autonoma_msgs/GroundTruthArray)
+- /tactical_planner/param/force_side    (std_msgs/String)
+- /tactical_planner/param/follow_when_forced (std_msgs/Bool)
+
+Publications
+------------
+- /flyeagle/a2rl/tactical_planner/trajectory  (a2rl_bs_msgs/ReferencePath)
+- /tactical_planner/status                     (std_msgs/String)        JSON status
+- /tactical_planner/fsm_state                  (std_msgs/String)        JSON FSM details
+- /tactical_planner/feasible_domain            (visualization_msgs/MarkerArray) Foxglove
+
+Corresponding to case 16 in planner.cpp (sel_track_mode=13, local_planner_method_=6).
+"""
+
+import os
+import sys
+import time
+import math
+import json
+import traceback
+from typing import Optional
+
+import numpy as np
+
+# ------------------------------------------------------------------
+# Path setup: ensure tactical_acados and src packages are importable
+# ------------------------------------------------------------------
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PKG_DIR = os.path.abspath(os.path.join(_THIS_DIR, '..', '..'))       # tactical_acados/
+_PROJECT_ROOT = os.path.abspath(os.path.join(_PKG_DIR, '..'))          # project root
+for _p in [_PROJECT_ROOT, os.path.join(_PROJECT_ROOT, 'src'), _PKG_DIR]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# ROS2 imports
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+
+from std_msgs.msg import String, Bool, Float64MultiArray
+from visualization_msgs.msg import Marker, MarkerArray
+
+# a2rl / autonoma message types
+from a2rl_bs_msgs.msg import (
+    Localization,
+    EgoState,
+    ReferencePath,
+    CartesianFrameState,
+    CartesianFrame,
+    Timestamp,
+)
+from autonoma_msgs.msg import GroundTruthArray
+
+# Tactical planner core imports
+from tactical_acados.config import TacticalConfig
+from tactical_acados.acados_planner import AcadosTacticalPlanner
+from tactical_acados.tactical_action import (
+    TacticalAction, PlannerGuidance, get_fallback_action, TacticalMode,
+)
+from tactical_acados.observation import TacticalObservation, build_observation
+from tactical_acados.safe_wrapper import SafeTacticalWrapper
+from tactical_acados.planner_guidance import TacticalToPlanner
+from tactical_acados.opponent import OpponentVehicle
+from tactical_acados.p2p import PushToPass
+from tactical_acados.follow_module import FollowModule
+from tactical_acados.a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
+from tactical_acados.sim_acados_only import load_setup
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_MAX_PATH_POINTS = 30
+_CARVER_MODE_MAP = {
+    'follow': CarverMode.FOLLOW,
+    'shadow': CarverMode.SHADOW,
+    'overtake': CarverMode.OVERTAKE,
+    'raceline': CarverMode.RACELINE,
+    'hold': CarverMode.HOLD,
+    'force_left': CarverMode.FORCE_LEFT,
+    'force_right': CarverMode.FORCE_RIGHT,
+}
+
+
+class TacticalPlannerNode(Node):
+    """ROS2 node wrapping the tactical planner pipeline."""
+
+    def __init__(self):
+        super().__init__('tactical_planner_node')
+
+        # ── ROS2 Parameters ──────────────────────────────────────────
+        self.declare_parameter('policy_type', 'heuristic')
+        self.declare_parameter('force_side', 'none')
+        self.declare_parameter('follow_when_forced', True)
+        self.declare_parameter('scenario', 'scenario_c')
+        self.declare_parameter('timer_hz', 20.0)
+        self.declare_parameter('track_name', 'yas_user_smoothed')
+        self.declare_parameter('vehicle_name', 'eav25_car')
+        self.declare_parameter('raceline_name',
+                               'yasnorth_3d_rl_as_ref_eav25_car_gg_0.1')
+
+        policy_type = self.get_parameter('policy_type').value
+        force_side_str = self.get_parameter('force_side').value
+        follow_when_forced = self.get_parameter('follow_when_forced').value
+        scenario_name = self.get_parameter('scenario').value
+        timer_hz = self.get_parameter('timer_hz').value
+        track_name = self.get_parameter('track_name').value
+        vehicle_name = self.get_parameter('vehicle_name').value
+        raceline_name = self.get_parameter('raceline_name').value
+
+        force_side = None if force_side_str in ('none', '') else force_side_str
+
+        # ── Core planner setup (reuses sim_tactical / sim_acados_only) ──
+        self.cfg = TacticalConfig()
+        self.params, self.track_handler, self.gg_handler, \
+            self.local_planner, self.global_planner = load_setup(
+                self.cfg,
+                track_name=track_name,
+                vehicle_name=vehicle_name,
+                raceline_name=raceline_name,
+            )
+
+        self.planner = AcadosTacticalPlanner(
+            local_planner=self.local_planner,
+            global_planner=self.global_planner,
+            track_handler=self.track_handler,
+            vehicle_params=self.params['vehicle_params'],
+            cfg=self.cfg,
+        )
+
+        self.safe_wrapper = SafeTacticalWrapper(self.cfg)
+        self.tactical_mapper = TacticalToPlanner(self.track_handler, self.cfg)
+        self.p2p = PushToPass(self.cfg)
+        self.a2rl_carver = A2RLObstacleCarver(
+            self.track_handler, self.cfg,
+            global_planner=self.global_planner,
+        )
+        self.follow_mod = FollowModule(self.track_handler, self.cfg)
+
+        # ── Policy ───────────────────────────────────────────────────
+        if policy_type == 'heuristic':
+            from tactical_acados.policies.heuristic_policy import (
+                HeuristicTacticalPolicy,
+            )
+            self.policy = HeuristicTacticalPolicy(
+                self.cfg,
+                force_side=force_side,
+                follow_when_forced=follow_when_forced,
+            )
+        elif policy_type == 'rl':
+            from tactical_acados.policies.rl_policy import RLTacticalPolicy
+            ckpt = os.path.join(_PKG_DIR, 'checkpoints', 'best_policy.pt')
+            self.policy = RLTacticalPolicy(ckpt, self.cfg)
+        else:
+            from tactical_acados.policies.heuristic_policy import (
+                HeuristicTacticalPolicy,
+            )
+            self.policy = HeuristicTacticalPolicy(self.cfg)
+
+        self.prev_action = get_fallback_action()
+
+        # ── Runtime state ────────────────────────────────────────────
+        self._ego_state: Optional[dict] = None
+        self._loc_msg: Optional[Localization] = None
+        self._ego_msg: Optional[EgoState] = None
+        self._opp_detections: list = []          # list of GroundTruth
+        self._loc_stamp = self.get_clock().now()
+        self._ego_stamp = self.get_clock().now()
+        self._opp_stamp = self.get_clock().now()
+        self._step = 0
+
+        # ── QoS ──────────────────────────────────────────────────────
+        qos_sensor = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        qos_reliable = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+
+        # ── Subscribers ──────────────────────────────────────────────
+        self.sub_loc = self.create_subscription(
+            Localization,
+            '/flyeagle/a2rl/observer/ego_loc',
+            self._cb_localization, qos_sensor)
+
+        self.sub_ego = self.create_subscription(
+            EgoState,
+            '/flyeagle/a2rl/observer/ego_state',
+            self._cb_ego_state, qos_sensor)
+
+        self.sub_opp = self.create_subscription(
+            GroundTruthArray,
+            'flyeagle/v2v_ground_truth',
+            self._cb_opponents, qos_sensor)
+
+        # Runtime parameter topics
+        self.sub_force_side = self.create_subscription(
+            String,
+            '/tactical_planner/param/force_side',
+            self._cb_force_side, qos_reliable)
+
+        self.sub_follow = self.create_subscription(
+            Bool,
+            '/tactical_planner/param/follow_when_forced',
+            self._cb_follow_when_forced, qos_reliable)
+
+        # ── Publishers ───────────────────────────────────────────────
+        self.pub_traj = self.create_publisher(
+            ReferencePath,
+            '/flyeagle/a2rl/tactical_planner/trajectory',
+            qos_reliable)
+
+        self.pub_status = self.create_publisher(
+            String, '/tactical_planner/status', qos_reliable)
+
+        self.pub_fsm = self.create_publisher(
+            String, '/tactical_planner/fsm_state', qos_reliable)
+
+        self.pub_domain = self.create_publisher(
+            MarkerArray, '/tactical_planner/feasible_domain', qos_reliable)
+
+        self.pub_thresholds = self.create_publisher(
+            String, '/tactical_planner/thresholds', qos_reliable)
+
+        # ── Timer ────────────────────────────────────────────────────
+        period = 1.0 / max(timer_hz, 1.0)
+        self.timer = self.create_timer(period, self._timer_callback)
+
+        self.get_logger().info(
+            f'\033[1;33m[TacticalPlannerNode] started  '
+            f'policy={policy_type}  force_side={force_side}  '
+            f'hz={timer_hz}  track={track_name}\033[0m')
+
+    # ==================================================================
+    # Subscriber Callbacks
+    # ==================================================================
+
+    def _cb_localization(self, msg: Localization):
+        self._loc_msg = msg
+        self._loc_stamp = self.get_clock().now()
+
+    def _cb_ego_state(self, msg: EgoState):
+        self._ego_msg = msg
+        self._ego_stamp = self.get_clock().now()
+
+    def _cb_opponents(self, msg: GroundTruthArray):
+        self._opp_detections = list(msg.vehicles)
+        self._opp_stamp = self.get_clock().now()
+
+    def _cb_force_side(self, msg: String):
+        val = msg.data.strip().lower()
+        side = None if val in ('none', '') else val
+        if hasattr(self.policy, 'set_force_side'):
+            self.policy.set_force_side(side)
+        self.get_logger().info(f'[param] force_side ← {side}')
+
+    def _cb_follow_when_forced(self, msg: Bool):
+        if hasattr(self.policy, 'set_follow_when_forced'):
+            self.policy.set_follow_when_forced(msg.data)
+        self.get_logger().info(f'[param] follow_when_forced ← {msg.data}')
+
+    # ==================================================================
+    # Ego state construction from ROS2 messages
+    # ==================================================================
+
+    def _build_ego_state(self) -> Optional[dict]:
+        """Convert latest Localization + EgoState messages to ego_state dict."""
+        lc = self._loc_msg
+        eg = self._ego_msg
+        if lc is None or eg is None:
+            return None
+
+        x = float(lc.position.x)
+        y = float(lc.position.y)
+        z = float(lc.position.z)
+        yaw = float(lc.orientation_ypr.z)
+
+        vx = float(eg.velocity.x)
+        vy = float(eg.velocity.y)
+        V = math.sqrt(vx * vx + vy * vy)
+        ax_body = float(eg.acceleration.x)
+        ay_body = float(eg.acceleration.y)
+
+        # Convert to Frenet via track_handler
+        try:
+            sn = self.track_handler.cartesian2sn(x, y)
+            s = float(sn[0])
+            n = float(sn[1])
+        except Exception:
+            if self._ego_state is not None:
+                return self._ego_state   # keep last valid
+            return None
+
+        # chi = heading deviation from road tangent
+        Omega_z = float(np.interp(
+            s, self.track_handler.s, self.track_handler.Omega_z,
+            period=self.track_handler.s[-1]))
+        road_heading = float(np.interp(
+            s, self.track_handler.s, self.track_handler.psi,
+            period=self.track_handler.s[-1]))
+
+        chi = _wrap_angle(yaw - road_heading)
+
+        s_dot = V * math.cos(chi) / max(1.0 - n * Omega_z, 0.01)
+        n_dot = V * math.sin(chi)
+
+        return {
+            's': s, 'n': n, 'V': V,
+            'chi': chi, 'ax': ax_body, 'ay': ay_body,
+            'x': x, 'y': y, 'z': z,
+            's_dot': s_dot, 'n_dot': n_dot,
+            'time_ns': int(lc.timestamp.nanoseconds),
+        }
+
+    # ==================================================================
+    # Opponent state construction
+    # ==================================================================
+
+    def _build_opp_states(self) -> list:
+        """Convert GroundTruth detections to opponent state dicts.
+
+        GroundTruth provides *ego-local* del_x (forward), del_y (right).
+        We convert to global (x, y) then to Frenet (s, n).
+        """
+        if self._ego_state is None or not self._opp_detections:
+            return []
+
+        ego_x = self._ego_state['x']
+        ego_y = self._ego_state['y']
+        ego_yaw = math.atan2(
+            self._ego_state.get('n_dot', 0.0),
+            self._ego_state.get('s_dot', 1.0),
+        )
+        # Better: use localization yaw directly
+        if self._loc_msg is not None:
+            ego_yaw = float(self._loc_msg.orientation_ypr.z)
+
+        cos_y = math.cos(ego_yaw)
+        sin_y = math.sin(ego_yaw)
+
+        opp_list = []
+        for i, gt in enumerate(self._opp_detections):
+            # del_x = forward, del_y = rightward in ego frame
+            dx = float(gt.del_x)
+            dy = float(-gt.del_y)  # stored as -del_y = leftward (same as C++)
+
+            # ego-local → global
+            gx = ego_x + cos_y * dx - sin_y * dy
+            gy = ego_y + sin_y * dx + cos_y * dy
+
+            opp_V = float(gt.vx)  # speed estimate
+
+            try:
+                sn = self.track_handler.cartesian2sn(gx, gy)
+                opp_s = float(sn[0])
+                opp_n = float(sn[1])
+            except Exception:
+                continue
+
+            opp_list.append({
+                'id': int(gt.car_num) if hasattr(gt, 'car_num') else i,
+                's': opp_s, 'n': opp_n, 'V': opp_V,
+                'chi': 0.0, 'ax': 0.0, 'ay': 0.0,
+                'x': gx, 'y': gy, 'z': 0.0,
+                'tactic': 'unknown',
+                'target_n_offset': 0.0,
+            })
+
+        return opp_list
+
+    # ==================================================================
+    # Timer callback — main planning loop
+    # ==================================================================
+
+    def _timer_callback(self):
+        t0 = time.time()
+
+        # 1) build ego state
+        ego = self._build_ego_state()
+        if ego is None:
+            loc_age = (self.get_clock().now() - self._loc_stamp).nanoseconds * 1e-9
+            ego_age = (self.get_clock().now() - self._ego_stamp).nanoseconds * 1e-9
+            self.get_logger().warn_once(
+                f'[Tactical] Waiting for ego data  loc_age={loc_age:.1f}s  '
+                f'ego_age={ego_age:.1f}s')
+            return
+        self._ego_state = ego
+
+        # 2) build opponent states
+        opp_states = self._build_opp_states()
+
+        # Provide simple predictions (constant s, n for 1-step)
+        for os_d in opp_states:
+            os_d['pred_s'] = np.array([os_d['s']])
+            os_d['pred_n'] = np.array([os_d['n']])
+            os_d['pred_x'] = np.array([os_d['x']])
+            os_d['pred_y'] = np.array([os_d['y']])
+
+        # 3) build observation
+        obs = build_observation(
+            ego_state=ego,
+            opponents=opp_states,
+            track_handler=self.track_handler,
+            p2p_state=self.p2p.get_state_vector(),
+            prev_action_array=self.prev_action.to_array(),
+            planner_healthy=self.planner.planner_healthy,
+            cfg=self.cfg,
+        )
+
+        # 4) tactical action
+        action = self.policy.act(obs)
+
+        # 4.5) feed carver overtake_ready back
+        if hasattr(self.policy, 'set_overtake_ready'):
+            self.policy.set_overtake_ready(self.a2rl_carver.overtake_ready)
+
+        # 5) guidance
+        guidance = self.tactical_mapper.map(
+            action, obs, N_stages=self.cfg.N_steps_acados)
+
+        c_mode = _CARVER_MODE_MAP.get(
+            getattr(self.policy, 'carver_mode_str', 'follow'),
+            CarverMode.FOLLOW)
+        c_side = getattr(self.policy, 'carver_side', None)
+
+        horizon_m = self.cfg.optimization_horizon_m
+        ds = horizon_m / self.cfg.N_steps_acados
+        follow_opps = getattr(self.policy, 'follow_when_forced', True)
+
+        carver_guidance = self.a2rl_carver.construct_guidance(
+            ego,
+            opp_states,
+            self.cfg.N_steps_acados,
+            ds,
+            mode=c_mode,
+            shadow_side=c_side,
+            overtake_side=c_side,
+            prev_trajectory=self.planner._prev_trajectory,
+            planner_healthy=self.planner.planner_healthy,
+            follow_opponents=follow_opps,
+        )
+
+        if carver_guidance.n_left_override is not None:
+            guidance.n_left_override = carver_guidance.n_left_override
+        if carver_guidance.n_right_override is not None:
+            guidance.n_right_override = carver_guidance.n_right_override
+        if carver_guidance.speed_cap < guidance.speed_cap:
+            guidance.speed_cap = carver_guidance.speed_cap
+        if carver_guidance.speed_scale < guidance.speed_scale:
+            guidance.speed_scale = carver_guidance.speed_scale
+
+        # 6) plan
+        trajectory = self.planner.plan(ego, guidance)
+        t_plan = time.time() - t0
+
+        # 7) publish trajectory
+        self._publish_trajectory(trajectory, ego)
+
+        # 8) publish status / FSM / domain / thresholds
+        self._publish_status(trajectory, action, c_mode, c_side, t_plan)
+        self._publish_fsm_state(action, guidance)
+        self._publish_thresholds()
+        self._publish_feasible_domain(guidance, ego)
+
+        self.prev_action = action
+        self._step += 1
+
+        if self._step % 40 == 0:
+            ph = getattr(self.policy, 'debug_info', {}).get('phase', '?')
+            gap = getattr(self.policy, 'debug_info', {}).get('gap', None)
+            gap_s = f'{gap:.1f}' if gap else 'N/A'
+            self.get_logger().info(
+                f'[{self._step:5d}] s={ego["s"]:.1f} n={ego["n"]:.2f} '
+                f'V={ego["V"]:.1f} | {ph} gap={gap_s} | '
+                f'{c_mode.name} {c_side or ""} | {t_plan*1000:.0f}ms')
+
+    # ==================================================================
+    # Publishers
+    # ==================================================================
+
+    def _publish_trajectory(self, trajectory: dict, ego: dict):
+        """Pack trajectory into a2rl_bs_msgs/ReferencePath and publish."""
+        msg = ReferencePath()
+        msg.timestamp.nanoseconds = ego.get('time_ns', 0)
+        msg.path_time_discretization_s = float(
+            self.cfg.planning_horizon / max(len(trajectory['t']), 1))
+        msg.origin_position.x = float(ego['x'])
+        msg.origin_position.y = float(ego['y'])
+        msg.origin_position.z = float(ego['z'])
+        msg.origin_orientation_ypr.z = float(
+            self._loc_msg.orientation_ypr.z if self._loc_msg else 0.0)
+
+        N = min(len(trajectory['x']), _MAX_PATH_POINTS)
+        for i in range(N):
+            pt = CartesianFrameState()
+            pt.timestamp.nanoseconds = ego.get('time_ns', 0)
+
+            # position: local frame (will be recomputed in planner.cpp)
+            pt.position.x = float(trajectory['x'][i])
+            pt.position.y = float(trajectory['y'][i])
+            pt.position.z = float(trajectory.get('z', np.zeros(N))[i])
+
+            # Convention matching case 14/15 in planner.cpp:
+            #   orientation_ypr.x = x_global
+            #   orientation_ypr.y = y_global
+            pt.orientation_ypr.x = float(trajectory['x'][i])
+            pt.orientation_ypr.y = float(trajectory['y'][i])
+
+            # velocity_linear.x = speed
+            # velocity_linear.y = yaw (heading)
+            V_i = float(trajectory['V'][i])
+            pt.velocity_linear.x = V_i
+
+            # Compute heading from (s, chi) → global yaw
+            s_i = float(trajectory['s'][i])
+            chi_i = float(trajectory['chi'][i])
+            road_yaw = float(np.interp(
+                s_i, self.track_handler.s, self.track_handler.psi,
+                period=self.track_handler.s[-1]))
+            yaw_i = road_yaw + chi_i
+            pt.velocity_linear.y = yaw_i
+
+            # velocity_angular.z = yaw_rate ≈ curvature × speed
+            Omega_z = float(np.interp(
+                s_i, self.track_handler.s, self.track_handler.Omega_z,
+                period=self.track_handler.s[-1]))
+            n_i = float(trajectory['n'][i])
+            kappa = Omega_z / max(1.0 - n_i * Omega_z, 0.01)
+            yaw_rate = kappa * V_i
+            pt.velocity_angular.z = yaw_rate
+
+            msg.path.append(pt)
+
+        self.pub_traj.publish(msg)
+
+    def _publish_status(self, trajectory, action, c_mode, c_side, t_plan):
+        """Publish JSON status string."""
+        status = {
+            'step': self._step,
+            'planner_ok': self.planner.planner_healthy,
+            'tactic': action.discrete_tactic.name,
+            'carver_mode': c_mode.name,
+            'carver_side': c_side,
+            'overtake_ready': self.a2rl_carver.overtake_ready,
+            'plan_ms': round(t_plan * 1000, 1),
+            'n_points': len(trajectory['x']),
+        }
+        msg = String()
+        msg.data = json.dumps(status)
+        self.pub_status.publish(msg)
+
+    def _publish_fsm_state(self, action, guidance):
+        """Publish detailed FSM/policy state for diagnostics."""
+        info = getattr(self.policy, 'debug_info', {})
+        fsm = {
+            'phase': info.get('phase', 'N/A'),
+            'target_id': info.get('target_id'),
+            'gap': info.get('gap'),
+            'locked_side': info.get('locked_side'),
+            'phase_time': info.get('phase_time'),
+            'tactic': action.discrete_tactic.name,
+            'aggressiveness': round(action.aggressiveness, 3),
+            'terminal_n': round(guidance.terminal_n_target, 3),
+            'speed_cap': round(guidance.speed_cap, 1),
+            'speed_scale': round(guidance.speed_scale, 3),
+            'safety_distance': round(guidance.safety_distance, 3),
+        }
+        msg = String()
+        msg.data = json.dumps(fsm)
+        self.pub_fsm.publish(msg)
+
+    def _publish_thresholds(self):
+        """Publish tactical thresholds (constants from config)."""
+        cfg = self.cfg
+        thresholds = {
+            'chase_gap': getattr(cfg, 'chase_gap', 15.0),
+            'overtake_gap': getattr(cfg, 'overtake_gap', 12.0),
+            'abort_gap': getattr(cfg, 'abort_gap', 25.0),
+            'follow_dist': getattr(cfg, 'follow_distance', 8.0),
+            'safety_dist': cfg.safety_distance_default,
+            'vehicle_length': cfg.vehicle_length,
+            'vehicle_width': cfg.vehicle_width,
+            'lateral_safety': getattr(cfg, 'lateral_safety', 2.0),
+        }
+        msg = String()
+        msg.data = json.dumps(thresholds)
+        self.pub_thresholds.publish(msg)
+
+    def _publish_feasible_domain(self, guidance, ego):
+        """Publish feasible domain boundaries as Foxglove-compatible
+        visualization_msgs/MarkerArray (LINE_STRIP)."""
+        marker_arr = MarkerArray()
+
+        w_left = getattr(guidance, 'n_left_override', None)
+        w_right = getattr(guidance, 'n_right_override', None)
+        if w_left is None and w_right is None:
+            self.pub_domain.publish(marker_arr)
+            return
+
+        stamp = self.get_clock().now().to_msg()
+
+        for side_idx, (w_arr, color_g) in enumerate([
+            (w_left, 0.8),   # left  = green-ish
+            (w_right, 0.2),  # right = red-ish
+        ]):
+            if w_arr is None:
+                continue
+
+            mk = Marker()
+            mk.header.stamp = stamp
+            mk.header.frame_id = 'map'
+            mk.ns = 'feasible_domain'
+            mk.id = side_idx
+            mk.type = Marker.LINE_STRIP
+            mk.action = Marker.ADD
+            mk.scale.x = 0.25  # line width
+
+            mk.color.r = 1.0 - color_g
+            mk.color.g = color_g
+            mk.color.b = 0.2
+            mk.color.a = 0.8
+
+            s0 = ego['s']
+            ds = self.cfg.optimization_horizon_m / self.cfg.N_steps_acados
+            n_arr = np.asarray(w_arr)
+
+            for k in range(len(n_arr)):
+                s_k = (s0 + k * ds) % self.track_handler.s[-1]
+                n_k = float(n_arr[k])
+                try:
+                    xyz = self.track_handler.sn2cartesian(s_k, n_k)
+                    from geometry_msgs.msg import Point
+                    p = Point()
+                    p.x = float(xyz[0])
+                    p.y = float(xyz[1])
+                    p.z = float(xyz[2]) + 0.3  # slightly above ground
+                    mk.points.append(p)
+                except Exception:
+                    pass
+
+            marker_arr.markers.append(mk)
+
+        self.pub_domain.publish(marker_arr)
+
+
+# ======================================================================
+# Helpers
+# ======================================================================
+
+def _wrap_angle(a: float) -> float:
+    """Wrap angle to [-pi, pi]."""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = TacticalPlannerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

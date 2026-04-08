@@ -662,6 +662,15 @@ namespace base_planner
 		last_hierarchical_time_ = this->get_clock()->now();
 	}
 
+	// Tactical RL/Heuristic planner path callback: receives ReferencePath from external Python tactical_planner_node
+	void BasePlannerNode::tactical_path_Callback(
+		const a2rl_bs_msgs::msg::ReferencePath::SharedPtr msg)
+	{
+		last_tactical_path_ = *msg;
+		tactical_received_ = true;
+		last_tactical_time_ = this->get_clock()->now();
+	}
+
 	// IGT game-theoretic value callback: receives V_GT scalar from igt_value_node
 	void BasePlannerNode::igt_game_value_Callback(
 		const std_msgs::msg::Float64::SharedPtr msg)
@@ -1326,6 +1335,14 @@ namespace base_planner
 				std::bind(&BasePlannerNode::hierarchical_path_Callback, this,
 						  std::placeholders::_1));
 		last_hierarchical_time_ = this->get_clock()->now();
+
+		// Tactical RL/Heuristic planner (external Python tactical_planner_node, case 16)
+		tactical_path_subscriber_ =
+			this->create_subscription<a2rl_bs_msgs::msg::ReferencePath>(
+				"/flyeagle/a2rl/tactical_planner/trajectory", 1,
+				std::bind(&BasePlannerNode::tactical_path_Callback, this,
+						  std::placeholders::_1));
+		last_tactical_time_ = this->get_clock()->now();
 
 		// IGT Game-Theoretic Value input (from igt_value_node, Berkeley IGT)
 		igt_game_value_subscriber_ =
@@ -3681,6 +3698,11 @@ namespace base_planner
 				// Hierarchical博弈规划模式 (MCTS+LQNG, external Python node)
 				race_follow_overtake_flag = 15;
 			}
+			else if (sel_track_mode == 13)
+			{
+				// Tactical RL/Heuristic规划模式 (external Python tactical_planner_node)
+				race_follow_overtake_flag = 16;
+			}
 
 			// If local_planner_method_==1 and flag==1 (normal raceline), override to sampling
 			// RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -3711,6 +3733,11 @@ namespace base_planner
 			if (local_planner_method_ == 5 && race_follow_overtake_flag == 1 && hierarchical_received_)
 			{
 				race_follow_overtake_flag = 15;
+			}
+			// If local_planner_method_==6 and flag==1 (normal raceline), override to tactical
+			if (local_planner_method_ == 6 && race_follow_overtake_flag == 1 && tactical_received_)
+			{
+				race_follow_overtake_flag = 16;
 			}
 		}
 		else
@@ -6135,6 +6162,121 @@ namespace base_planner
 				RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
 					"\033[1;31m[Hierarchical] No fresh path (age=%.0fms), fallback to raceline\033[0m",
 					hier_age_sec * 1000.0);
+
+				for (int i = 0; i < n_points; i++)
+				{
+					x_global = localResult["x"][i];
+					y_global = localResult["y"][i];
+					yaw_ref = localResult["angleRad"][i];
+					ref_speed = localResult["speed"][i];
+					curvature = localResult["curvature"][i];
+					ats = 0;
+
+					local_point = convertGlobaltoLocal(
+						x_global, y_global, lc_msg.orientation_ypr.z,
+						lc_msg.position.x, lc_msg.position.y);
+
+					target_speed = std::min(static_cast<float>(ref_speed), rc_speed);
+					target_speed = std::max(0.001f, target_speed);
+
+					cartesianMsgs[i] = pathPointMsgPopulation(
+						time_ns, local_point, lc_msg.position.z,
+						lc_msg.orientation_ypr.z,
+						yaw_ref, target_speed, curvature,
+						speed_per, x_global, y_global, ats);
+
+					time_ns += basePlannerConfig.path_discretization_sec * 1e9;
+
+					log_data.emplace_back(x_global, y_global, yaw_ref, target_speed);
+					record_for_station_vel[i] = target_speed;
+					record_for_station_yaw[i] = yaw_ref;
+				}
+			}
+			break;
+		}
+
+		case 16:
+		{
+			// Tactical RL/Heuristic planner (external Python tactical_planner_node)
+			// Receives ReferencePath from /flyeagle/a2rl/tactical_planner/trajectory
+			speak_count = (speak_count + 1) % number_frequency;
+			if (speak_count == 0)
+			{
+				RCLCPP_INFO(this->get_logger(),
+					"\033[1;33m Tactical-RL/Heuristic s=%.2f lap=%d\033[0m",
+					race_s_self, lap_count);
+			}
+
+			bool tact_ok = false;
+			double tact_age_sec = (this->get_clock()->now() - last_tactical_time_).seconds();
+			if (tactical_received_ && tact_age_sec < tactical_timeout_sec_)
+			{
+				const auto &tact_path = last_tactical_path_;
+				int tact_n = static_cast<int>(tact_path.path.size());
+
+				if (tact_n > 0)
+				{
+					int use_n = std::min(tact_n, n_points);
+					tact_ok = true;
+
+					for (int i = 0; i < n_points; i++)
+					{
+						if (i < use_n)
+						{
+							const auto &tact_pt = tact_path.path[i];
+
+							float tact_x_global = tact_pt.orientation_ypr.x;
+							float tact_y_global = tact_pt.orientation_ypr.y;
+							float tact_yaw_ref = tact_pt.velocity_linear.y;
+							float tact_speed = tact_pt.velocity_linear.x;
+							float tact_curvature = 0.0f;
+							if (std::abs(tact_speed) > 0.01f)
+								tact_curvature = tact_pt.velocity_angular.z / tact_speed;
+
+							target_speed = std::min(static_cast<float>(tact_speed), rc_speed);
+							target_speed = std::max(0.001f, target_speed);
+
+							local_point = convertGlobaltoLocal(
+								tact_x_global, tact_y_global,
+								lc_msg.orientation_ypr.z,
+								lc_msg.position.x, lc_msg.position.y);
+
+							cartesianMsgs[i] = pathPointMsgPopulation(
+								time_ns, local_point, lc_msg.position.z,
+								lc_msg.orientation_ypr.z,
+								tact_yaw_ref, target_speed, tact_curvature,
+								speed_per, tact_x_global, tact_y_global, 0);
+						}
+						else
+						{
+							cartesianMsgs[i] = cartesianMsgs[use_n - 1];
+						}
+
+						time_ns += basePlannerConfig.path_discretization_sec * 1e9;
+
+						float log_x = cartesianMsgs[i].orientation_ypr.x;
+						float log_y = cartesianMsgs[i].orientation_ypr.y;
+						float log_yaw = cartesianMsgs[i].velocity_linear.y;
+						float log_speed = cartesianMsgs[i].velocity_linear.x;
+						log_data.emplace_back(log_x, log_y, log_yaw, log_speed);
+						record_for_station_vel[i] = log_speed;
+						record_for_station_yaw[i] = log_yaw;
+					}
+
+					RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+						"\033[1;33m[Tactical] OK: %d pts, age=%.0fms, speed=[%.1f..%.1f]\033[0m",
+						use_n, tact_age_sec * 1000.0,
+						cartesianMsgs[0].velocity_linear.x,
+						cartesianMsgs[std::min(use_n - 1, n_points - 1)].velocity_linear.x);
+				}
+			}
+
+			if (!tact_ok)
+			{
+				// Fallback to raceline (case 1 logic)
+				RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+					"\033[1;31m[Tactical] No fresh path (age=%.0fms, recv=%d), fallback to raceline\033[0m",
+					tact_age_sec * 1000.0, (int)tactical_received_);
 
 				for (int i = 0; i < n_points; i++)
 				{
