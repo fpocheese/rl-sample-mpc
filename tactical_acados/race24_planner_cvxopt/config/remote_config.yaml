@@ -1,0 +1,9 @@
+remote_control:
+      server_ip: 0.0.0.0  # for self computer
+      # server_ip: 100.111.110.37 # for remote computer 
+      server_port: 6666
+      period_us: 50000
+
+remote_server:
+      server_port: 6666
+

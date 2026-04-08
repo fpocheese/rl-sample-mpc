@@ -1,0 +1,10 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/home/uav/Simulator_Cloud/install/vectornav_msgs/lib/python3.10/site-packages",
+        "/home/uav/Simulator_Cloud/install/rtklib_msgs/lib/python3.10/site-packages",
+        "/home/uav/Simulator_Cloud/install/eav24_bsu_msgs/lib/python3.10/site-packages",
+        "/home/uav/Simulator_Cloud/install/autonoma_msgs/lib/python3.10/site-packages",
+        "/home/uav/Simulator_Cloud/install/a2rl_bs_msgs/lib/python3.10/site-packages",
+        "/opt/ros/iron/lib/python3.10/site-packages"
+    ]
+}

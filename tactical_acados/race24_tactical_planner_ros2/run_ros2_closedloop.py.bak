@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""
+ROS2 closed-loop test — single process launcher.
+
+Starts sim_env_node + tactical_planner_node in the same process with a
+MultiThreadedExecutor, avoiding colcon-build ceremony.  Perfect for fast
+iteration during development.
+
+Usage:
+  source /opt/ros/humble/setup.bash
+  source /home/uav/race24/Racecar/install/setup.bash
+  python3 run_ros2_closedloop.py [--scenario scenario_c] [--max-steps 99999] [--no-viz]
+"""
+
+import os
+import sys
+import time
+import argparse
+
+# ── Path setup ───────────────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACKAGE_ROOT = _THIS_DIR
+for _p in [_PACKAGE_ROOT,
+           os.path.join(_PACKAGE_ROOT, 'src'),
+           os.path.join(_PACKAGE_ROOT, 'tactical_acados')]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+os.chdir(_PACKAGE_ROOT)
+
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
+
+from tactical_planner_ros2.tactical_planner_node import TacticalPlannerNode
+from tactical_planner_ros2.sim_env_node import SimEnvNode
+
+
+def main():
+    parser = argparse.ArgumentParser(description='ROS2 closed-loop sim')
+    parser.add_argument('--scenario', default='scenario_c')
+    parser.add_argument('--policy', default='heuristic')
+    parser.add_argument('--max-steps', type=int, default=99999)
+    parser.add_argument('--no-viz', action='store_true')
+    parser.add_argument('--force-side', default='none')
+    args = parser.parse_args()
+
+    # Must pass params as ROS overrides since rclpy.init is called once
+    ros_args = [
+        '--ros-args',
+        '-p', f'scenario:={args.scenario}',
+        '-p', f'max_steps:={args.max_steps}',
+        '-p', f'visualize:={not args.no_viz}',
+        '-p', f'policy_type:={args.policy}',
+        '-p', f'force_side:={args.force_side}',
+    ]
+
+    rclpy.init(args=ros_args)
+
+    # Create nodes — parameters need to be set individually
+    # We override via node-level params after creation
+    sim_node = SimEnvNode()
+    planner_node = TacticalPlannerNode()
+
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(sim_node)
+    executor.add_node(planner_node)
+
+    print('=' * 60)
+    print(f'ROS2 Closed-Loop: sim_env_node ↔ tactical_planner_node')
+    print(f'  Scenario: {args.scenario}')
+    print(f'  Policy:   {args.policy}')
+    print(f'  Max steps: {args.max_steps}')
+    print(f'  Viz: {not args.no_viz}')
+    print('=' * 60, flush=True)
+
+    try:
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=0.5)
+            if getattr(sim_node, '_finished', False):
+                break
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        sim_node.destroy_node()
+        planner_node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
+
+if __name__ == '__main__':
+    main()

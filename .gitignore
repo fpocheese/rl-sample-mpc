@@ -148,3 +148,18 @@ tactical_acados/**/wandb/
 tactical_acados/rl/Untitled.txt
 tactical_acados/benchmark_rl_results/*_stdout.log
 tactical_acados/benchmark_rl_results/*_stderr.log
+
+# ROS2 C++ build artifacts
+*.o
+*.d
+*.a
+.DS_Store
+
+# race24_planner_cvxopt: external dependencies (acados headers/libs, traj_planner)
+tactical_acados/race24_planner_cvxopt/external/
+# race24_planner_cvxopt: acados generated code (regenerated from OCP json)
+tactical_acados/race24_planner_cvxopt/scripts/c_generated_code/
+# race24_planner_cvxopt: nested git repo clone (not needed)
+tactical_acados/race24_planner_cvxopt/src/sampling_based_3D_local_planning/
+# Versioned shared libs
+*.so.*

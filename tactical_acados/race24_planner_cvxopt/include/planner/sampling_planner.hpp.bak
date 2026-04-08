@@ -1,0 +1,266 @@
+/* ================================================================== */
+/* Sampling-Based Local Planner (C++ rewrite)                         */
+/*                                                                    */
+/* Reimplementation of the core online local planning algorithm from  */
+/* the TUM sampling_based_3D_local_planning approach.                 */
+/*                                                                    */
+/* Key concepts (2D simplified):                                      */
+/*   - Frenet-frame polynomial trajectory sampling                    */
+/*   - Longitudinal: quartic polynomial s(t)                          */
+/*   - Lateral: quintic polynomial n(t)                               */
+/*   - Constraint checks: curvature, boundary, friction               */
+/*   - Cost evaluation: velocity + raceline + prediction              */
+/*   - Output in Cartesian (x,y,angleRad,curvature,speed,time)        */
+/*                                                                    */
+/* This is a clean C++ implementation, not a mechanical translation.  */
+/* It uses Eigen for small linear solves and standard containers.     */
+/* ================================================================== */
+#pragma once
+
+#include <cmath>
+#include <vector>
+#include <string>
+#include <memory>
+#include <algorithm>
+#include <eigen3/Eigen/Dense>
+
+namespace sampling_planner {
+
+// ======================== Data Structures ========================
+
+/// Track centerline data (loaded from BaseLine CSV of the existing system)
+struct TrackData {
+    std::vector<double> s;         // arc length (m)
+    std::vector<double> x;         // centerline X (m), ENU
+    std::vector<double> y;         // centerline Y (m), ENU
+    std::vector<double> theta;     // centerline heading (rad), ENU
+    std::vector<double> kref;      // centerline curvature (1/m) = Omega_z in 2D
+    std::vector<double> dkref;     // derivative of curvature w.r.t. s = dOmega_z
+    std::vector<double> w_left;    // left boundary offset (m), positive
+    std::vector<double> w_right;   // right boundary offset (m), negative
+    double track_length = 0.0;     // total track length (m)
+    double ds = 0.0;               // mean discretization step (m)
+    int N = 0;                     // number of discretization points
+};
+
+/// Vehicle performance envelope (simplified 2D GG diagram)
+struct VehicleGG {
+    std::vector<double> V;         // velocity grid (m/s)
+    std::vector<double> ay_max;    // max lateral acc at each V (m/s²), positive
+    std::vector<double> ax_max;    // max longitudinal acc at each V (engine, m/s²)
+    std::vector<double> ax_min;    // max braking decel at each V (negative, m/s²)
+    double gg_exponent = 2.0;      // diamond / super-ellipse exponent
+    double V_max = 80.0;           // maximum velocity (m/s)
+};
+
+/// Racing line reference (from existing TRAJdata)
+struct RacelineRef {
+    std::vector<double> s;         // arc length along track centerline (m)
+    std::vector<double> n;         // lateral offset from centerline (m)
+    std::vector<double> V;         // velocity (m/s)
+    std::vector<double> theta;     // heading (rad)
+    std::vector<double> kappa;     // curvature (1/m)
+    std::vector<double> chi;       // heading offset from track ref (rad)
+    std::vector<double> time;      // cumulative time (s)
+    int N = 0;
+};
+
+/// Frenet state of the ego vehicle
+struct FrenetState {
+    double s = 0.0;                // arc-length position (m)
+    double s_dot = 0.0;            // ds/dt (m/s)
+    double s_ddot = 0.0;           // d²s/dt² (m/s²)
+    double n = 0.0;                // lateral offset (m)
+    double n_dot = 0.0;            // dn/dt (m/s)
+    double n_ddot = 0.0;           // d²n/dt² (m/s²)
+};
+
+/// Opponent prediction in Frenet frame
+struct OpponentPrediction {
+    std::vector<double> t;         // prediction time axis (s)
+    std::vector<double> s;         // predicted s(t) (m)
+    std::vector<double> n;         // predicted n(t) (m)
+};
+
+/// Plan result in the same format as the existing system
+struct PlanResult {
+    std::vector<double> x;         // X (m), global ENU
+    std::vector<double> y;         // Y (m), global ENU
+    std::vector<double> angleRad;  // heading (rad)
+    std::vector<double> curvature; // curvature (1/m)
+    std::vector<double> speed;     // velocity (m/s)
+    std::vector<double> time;      // time from start (s)
+    bool valid = false;
+    int n_points = 0;
+    // Diagnostics
+    int n_candidates_valid = 0;    // how many candidates passed all checks
+    int n_candidates_total = 0;    // total candidates generated
+    double selected_cost = 0.0;    // cost of the selected trajectory
+    double n_end_selected = 0.0;   // n at end of selected trajectory
+    double v_end_selected = 0.0;   // speed at end of selected trajectory
+};
+
+/// Configuration parameters for the sampling planner
+struct SamplingConfig {
+    int n_lat_samples = 7;         // number of lateral samples
+    int v_lon_samples = 5;         // number of longitudinal velocity samples
+    int num_output_points = 30;    // output trajectory point count
+    double horizon = 3.75;         // planning horizon (s)
+    double dt = 0.125;             // output discretization (s)
+    double safety_distance = 0.5;  // safety distance to track bounds (m)
+    double kappa_max = 0.15;       // maximum curvature threshold (1/m)
+    double vehicle_width = 2.0;    // vehicle width (m)
+    double gg_abs_margin = 0.5;    // absolute GG margin (m/s²)
+    double s_dot_min = 1.0;        // minimum longitudinal velocity (m/s)
+    bool relative_generation = true; // generate curves relative to raceline
+    // Cost weights
+    double w_velocity = 100.0;
+    double w_raceline = 0.1;
+    double w_prediction = 5000.0;
+    double pred_s_factor = 0.015;
+    double pred_n_factor = 0.5;
+};
+
+
+// ======================== Main Planner Class ========================
+
+class SamplingLocalPlanner {
+public:
+    SamplingLocalPlanner() = default;
+    ~SamplingLocalPlanner() = default;
+
+    /**
+     * @brief Initialize the planner with track, vehicle, and raceline data.
+     * @return true if initialization succeeds
+     */
+    bool init(const TrackData& track, const VehicleGG& gg,
+              const RacelineRef& raceline, const SamplingConfig& cfg);
+
+    /**
+     * @brief Core planning function.
+     *
+     * Given the current Frenet state and opponent predictions, generate
+     * a set of candidate polynomial trajectories, check constraints,
+     * evaluate costs, and return the optimal trajectory in Cartesian format.
+     *
+     * @param ego_frenet Current Frenet state of the ego vehicle
+     * @param opponents Opponent predictions (can be empty)
+     * @return PlanResult with valid=true if a feasible trajectory was found
+     */
+    PlanResult plan(const FrenetState& ego_frenet,
+                    const std::vector<OpponentPrediction>& opponents);
+
+    bool isReady() const { return initialized_; }
+
+private:
+    // ---- Internal trajectory representation (all N_cand x N_time matrices) ----
+    // We store candidate trajectories as flat row-major matrices:
+    //   row i = candidate i, col j = time step j
+
+    struct CandidateSet {
+        int N_cand = 0;   // total number of candidate trajectories
+        int N_time = 0;   // number of time steps
+
+        // Frenet arrays (N_cand x N_time)
+        std::vector<double> t;          // time
+        std::vector<double> s;          // s
+        std::vector<double> s_dot;      // ds/dt
+        std::vector<double> s_ddot;     // d²s/dt²
+        std::vector<double> n;          // n
+        std::vector<double> n_dot;      // dn/dt
+        std::vector<double> n_ddot;     // d²n/dt²
+
+        // Velocity frame arrays
+        std::vector<double> V;          // absolute velocity
+        std::vector<double> chi;        // heading w.r.t. track
+        std::vector<double> ax;         // longitudinal acceleration
+        std::vector<double> ay;         // lateral acceleration
+        std::vector<double> kappa;      // curvature
+
+        // Validity
+        std::vector<bool> valid;        // per-candidate validity
+
+        // Terminal s-values for lateral curve generation
+        std::vector<double> s_end;
+        std::vector<double> s_dot_end;
+
+        void resize(int n_cand, int n_time);
+        inline double& at(std::vector<double>& arr, int i, int j) {
+            return arr[i * N_time + j];
+        }
+        inline double at(const std::vector<double>& arr, int i, int j) const {
+            return arr[i * N_time + j];
+        }
+    };
+
+    // ---- Postprocessed raceline for current planning cycle ----
+    struct PostprocessedRaceline {
+        std::vector<double> t, s, s_dot, s_ddot;
+        std::vector<double> n, n_dot, n_ddot;
+        std::vector<double> V, chi;
+        int N = 0;
+    };
+
+    // ---- Algorithm steps ----
+    PostprocessedRaceline postprocessRaceline(double s_start, double horizon) const;
+
+    void generateLongitudinalCurves(
+        CandidateSet& cs,
+        const FrenetState& ego,
+        const PostprocessedRaceline& rl,
+        bool raceline_tendency
+    ) const;
+
+    void generateLateralCurves(
+        CandidateSet& cs,
+        int row_offset,          // starting row in CandidateSet
+        int n_lon_groups,        // number of longitudinal groups (v_samples or v_samples*2)
+        const FrenetState& ego,
+        const PostprocessedRaceline& rl,
+        bool raceline_tendency
+    ) const;
+
+    void transformToVelocityFrame(CandidateSet& cs) const;
+
+    void checkCurvature(CandidateSet& cs) const;
+    void checkPathCollision(CandidateSet& cs) const;
+    void checkFrictionLimits(CandidateSet& cs) const;
+
+    int selectOptimalTrajectory(
+        const CandidateSet& cs,
+        const std::vector<OpponentPrediction>& opponents
+    ) const;
+
+    PlanResult buildResult(const CandidateSet& cs, int opt_idx) const;
+
+    // ---- Utility functions ----
+    /// Linear interpolation in sorted X array with periodic wrapping
+    double interpLinear(const std::vector<double>& X,
+                        const std::vector<double>& Y,
+                        double x, bool periodic = false) const;
+
+    /// Wrap angle to [-pi, pi]
+    static double wrapAngle(double a);
+
+    /// Modulo for doubles (positive result)
+    static double fmod_pos(double x, double period);
+
+    /// Solve 5x5 linear system Ac=b (for quartic polynomial)
+    static bool solve5x5(Eigen::Matrix<double,5,5>& A,
+                         Eigen::Matrix<double,5,1>& b,
+                         Eigen::Matrix<double,5,1>& c);
+
+    /// Solve 6x6 linear system Ac=b (for quintic polynomial)
+    static bool solve6x6(Eigen::Matrix<double,6,6>& A,
+                         Eigen::Matrix<double,6,1>& b,
+                         Eigen::Matrix<double,6,1>& c);
+
+    // ---- Member data ----
+    TrackData track_;
+    VehicleGG gg_;
+    RacelineRef raceline_;
+    SamplingConfig cfg_;
+    bool initialized_ = false;
+};
+
+} // namespace sampling_planner

@@ -1,0 +1,34 @@
+# Scenario A: Turns 1-5 (overtaking zone)
+scenario:
+  name: "YAS North Turns 1-5"
+  track_name: "yas_user_smoothed"
+  vehicle_name: "eav25_car"
+  raceline_name: "yasnorth_3d_rl_as_ref_eav25_car_gg_0.1"
+  s_start: 50.0
+  s_end: 1700.0
+
+ego:
+  start_s: 50.0
+  start_n: 0.0
+  start_V: 50.0
+  start_chi: 0.0
+  start_ax: 0.0
+  start_ay: 0.0
+
+opponents:
+  - id: 1
+    start_s: 100.0
+    start_n: 0.2
+    start_V: 42.0
+    speed_scale: 0.85
+  - id: 2
+    start_s: 180.0
+    start_n: -0.3
+    start_V: 40.0
+    speed_scale: 0.82
+
+planner:
+  optimization_horizon_m: 300.0
+  gg_margin: 0.1
+  safety_distance: 0.5
+  assumed_calc_time: 0.125
