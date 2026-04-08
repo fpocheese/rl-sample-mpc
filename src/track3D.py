@@ -53,6 +53,11 @@ class Track3D:
         self.Omega_y = self.__track_data_frame['omega_y_radpm'].to_numpy()
         self.Omega_z = self.__track_data_frame['omega_z_radpm'].to_numpy()
 
+        # 2-D heading of track spine (yaw in global frame)
+        # theta is the 3-D heading euler angle; psi is the atan2(dy, dx) flat heading
+        self.psi = np.arctan2(np.gradient(self.y, self.s),
+                              np.gradient(self.x, self.s))
+
         # derivatives of omega with finite differencing
         self.dOmega_x = np.diff(self.Omega_x) / self.ds
         self.dOmega_x = np.append(self.dOmega_x, self.dOmega_x[0])
@@ -677,6 +682,60 @@ class Track3D:
         ]).squeeze().transpose()
 
         return ref_p + (self.get_normal_vector_numpy(*euler_p) * normal_vector_factor * n).transpose()
+
+    def cartesian2sn(self, x_query, y_query):
+        """Convert global (x, y) to Frenet (s, n) via nearest-spine projection.
+
+        Works with scalar inputs. Returns np.array([s, n]).
+        Uses a nearest-point search on the discretised spine, then
+        refines with parabolic interpolation among neighboring points
+        and computes a signed lateral offset.
+        """
+        if not self.track_locked:
+            raise RuntimeError('Cannot transform. Track is not locked.')
+
+        x_q = float(x_query)
+        y_q = float(y_query)
+
+        # 1) find closest spine index
+        dx = self.x - x_q
+        dy = self.y - y_q
+        dist2 = dx * dx + dy * dy
+        idx = int(np.argmin(dist2))
+
+        N = len(self.s)
+
+        # 2) parabolic refinement among idx-1, idx, idx+1
+        im = (idx - 1) % N
+        ip = (idx + 1) % N
+        d_im = dist2[im]
+        d_i  = dist2[idx]
+        d_ip = dist2[ip]
+
+        # fractional offset in [-0.5, 0.5] toward the better neighbor
+        denom = 2.0 * (d_im - 2.0 * d_i + d_ip)
+        if abs(denom) > 1e-12:
+            frac = (d_im - d_ip) / denom
+            frac = max(-0.5, min(0.5, frac))
+        else:
+            frac = 0.0
+
+        s_est = float(self.s[idx]) + frac * self.ds
+
+        # wrap to [0, s_max)
+        s_max = float(self.s[-1])
+        s_est = s_est % s_max
+
+        # 3) signed lateral offset  n = dot(P - spine(s), leftward_normal)
+        #    Use the refined spine point (linear interp of x, y at s_est)
+        x_sp = float(np.interp(s_est, self.s, self.x, period=s_max))
+        y_sp = float(np.interp(s_est, self.s, self.y, period=s_max))
+        psi_sp = float(np.interp(s_est, self.s, self.psi, period=s_max))
+        nx = -np.sin(psi_sp)   # leftward normal
+        ny =  np.cos(psi_sp)
+        n_est = float((x_q - x_sp) * nx + (y_q - y_sp) * ny)
+
+        return np.array([s_est, n_est])
 
     def calc_apparent_accelerations(
             self, V, n, chi, ax, ay, s, h,
