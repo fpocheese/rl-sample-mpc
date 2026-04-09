@@ -28,7 +28,7 @@ from config import TacticalConfig
 from acados_planner import AcadosTacticalPlanner
 from tactical_action import PlannerGuidance, get_fallback_action
 from opponent import OpponentVehicle
-from sim_acados_only import load_setup, create_initial_state, perfect_tracking_update
+from sim_acados_only import load_setup, create_initial_state, perfect_tracking_update, dynamics_tracking_update
 
 
 def load_scenario(scenario_name: str) -> dict:
@@ -44,6 +44,7 @@ def run_duel(
         carver_mode='auto',
         shadow_side='left',
         overtake_side=None,
+        use_dynamics=False,
 ):
     """Run 1v1 duel simulation with full data recording."""
 
@@ -129,6 +130,8 @@ def run_duel(
     print("=" * 70)
     print(f"1v1 Duel: {sc['name']}")
     print(f"  Mode: {carver_mode.upper()}")
+    tracking_mode = "DYNAMICS (RK4+PD)" if use_dynamics else "PERFECT TRACKING"
+    print(f"  Ego update: {tracking_mode}")
     print(f"  Ego s={ego_cfg['start_s']}, Opp s={opp_cfg['start_s']} "
           f"(gap={opp_cfg['start_s'] - ego_cfg['start_s']:.0f}m)")
     print("=" * 70)
@@ -315,8 +318,12 @@ def run_duel(
         opponent.step(cfg.assumed_calc_time, ego_state)
 
         # 8) Tracking
-        ego_state = perfect_tracking_update(
-            ego_state, trajectory, cfg.assumed_calc_time, track_handler)
+        if use_dynamics:
+            ego_state = dynamics_tracking_update(
+                ego_state, trajectory, cfg.assumed_calc_time, track_handler)
+        else:
+            ego_state = perfect_tracking_update(
+                ego_state, trajectory, cfg.assumed_calc_time, track_handler)
 
         # 9) Collision  (v4: s-gap based, box overlap check)
         #    v5.1: ego ahead → ignore rear car completely (no collision check)
@@ -429,6 +436,8 @@ if __name__ == '__main__':
                         choices=['left', 'right', None])
     parser.add_argument('--max-steps', type=int, default=99999)
     parser.add_argument('--no-viz', action='store_true')
+    parser.add_argument('--dynamics', action='store_true',
+                        help='Use point-mass ODE dynamics instead of perfect tracking')
     args = parser.parse_args()
 
     run_duel(
@@ -438,4 +447,5 @@ if __name__ == '__main__':
         carver_mode=args.mode,
         shadow_side=args.shadow_side,
         overtake_side=args.overtake_side,
+        use_dynamics=args.dynamics,
     )

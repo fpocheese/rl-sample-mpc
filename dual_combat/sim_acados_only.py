@@ -166,8 +166,181 @@ def perfect_tracking_update(state: dict, trajectory: dict,
     return new_state
 
 
-def run_simulation(n_steps: int = 1000, visualize: bool = True):
-    """Run the ACADOS-only simulation loop."""
+# =====================================================================
+# Dynamics-based tracking update  (方案A: 点质量ODE + PD跟踪控制器)
+# =====================================================================
+
+def _point_mass_ode_time(state_vec, jx, jy, track_handler):
+    """
+    Point-mass ODE in TIME domain.
+
+    State vector: [s, V, n, chi, ax, ay]  (6-dim)
+    Control input: jx (longitudinal jerk), jy (lateral jerk)
+
+    Returns: d/dt [s, V, n, chi, ax, ay]
+
+    Equations (simplified, neglecting 3-D curvature corrections):
+        s_dot   = V * cos(chi) / (1 - n * Omega_z(s))
+        V_dot   = ax
+        n_dot   = V * sin(chi)
+        chi_dot = ay / V - Omega_z(s) * s_dot
+        ax_dot  = jx
+        ay_dot  = jy
+    """
+    s, V, n, chi, ax, ay = state_vec
+    track_len = track_handler.s[-1]
+    s_mod = s % track_len
+
+    Omega_z = float(np.interp(s_mod, track_handler.s, track_handler.Omega_z,
+                               period=track_len))
+
+    V_safe = max(V, 1.0)  # prevent division by zero
+    denom = 1.0 - n * Omega_z
+    denom = max(abs(denom), 0.01) * (1.0 if denom >= 0 else -1.0)
+
+    s_dot = V_safe * np.cos(chi) / denom
+    V_dot = ax
+    n_dot = V_safe * np.sin(chi)
+    chi_dot = ay / V_safe - Omega_z * s_dot
+    ax_dot = jx
+    ay_dot = jy
+
+    return np.array([s_dot, V_dot, n_dot, chi_dot, ax_dot, ay_dot])
+
+
+def dynamics_tracking_update(state: dict, trajectory: dict,
+                             dt: float, track_handler,
+                             n_sub: int = 10,
+                             Kp_ax: float = 40.0, Kd_ax: float = 5.0,
+                             Kp_ay: float = 40.0, Kd_ay: float = 5.0,
+                             jerk_max: float = 200.0) -> dict:
+    """
+    Advance ego state by *dt* using point-mass dynamics + PD tracking controller.
+
+    Instead of perfect interpolation from the trajectory, we numerically
+    integrate the point-mass ODE using a 4th-order Runge-Kutta scheme.
+    A PD controller generates jerk commands (jx, jy) to track the
+    acceleration references (ax_ref, ay_ref) interpolated from the
+    ACADOS trajectory.
+
+    Args:
+        state:          current ego state dict (s, V, n, chi, ax, ay, …)
+        trajectory:     planned trajectory dict from ACADOS planner
+        dt:             total integration time [s]  (= cfg.assumed_calc_time)
+        track_handler:  Track3D object
+        n_sub:          number of RK4 sub-steps within dt
+        Kp_ax/Kd_ax:    PD gains for longitudinal acceleration tracking
+        Kp_ay/Kd_ay:    PD gains for lateral acceleration tracking
+        jerk_max:       absolute jerk saturation [m/s^3]
+
+    Returns:
+        new_state dict (same format as perfect_tracking_update)
+    """
+    track_len = track_handler.s[-1]
+    t_traj = np.array(trajectory['t'])
+    ax_traj = np.array(trajectory['ax'])
+    ay_traj = np.array(trajectory['ay'])
+
+    # Pre-compute reference acceleration derivative (for D-term)
+    # dax_ref/dt ≈ finite difference of trajectory ax
+    dt_traj = np.diff(t_traj)
+    dt_traj = np.where(dt_traj < 1e-9, 1e-9, dt_traj)  # safeguard
+    dax_traj = np.append(np.diff(ax_traj) / dt_traj, 0.0)
+    day_traj = np.append(np.diff(ay_traj) / dt_traj, 0.0)
+
+    # Initial state vector: [s, V, n, chi, ax, ay]
+    x = np.array([
+        state['s'],
+        max(state['V'], 1.0),
+        state['n'],
+        state['chi'],
+        state['ax'],
+        state['ay'],
+    ])
+
+    h = dt / n_sub  # sub-step size
+
+    for k in range(n_sub):
+        t_now = k * h
+
+        # Reference from trajectory at current sub-step time
+        ax_ref = float(np.interp(t_now, t_traj, ax_traj))
+        ay_ref = float(np.interp(t_now, t_traj, ay_traj))
+        dax_ref = float(np.interp(t_now, t_traj, dax_traj))
+        day_ref = float(np.interp(t_now, t_traj, day_traj))
+
+        # PD controller: jerk = Kp*(a_ref - a) + Kd*(da_ref/dt - da/dt_approx)
+        # For the D-term on the actual side, we approximate da/dt ≈ jx_prev.
+        # At each sub-step we just use the feed-forward derivative as a
+        # reasonable approximation to keep it simple.
+        err_ax = ax_ref - x[4]
+        err_ay = ay_ref - x[5]
+        jx = Kp_ax * err_ax + Kd_ax * dax_ref
+        jy = Kp_ay * err_ay + Kd_ay * day_ref
+
+        # Saturate jerk
+        jx = float(np.clip(jx, -jerk_max, jerk_max))
+        jy = float(np.clip(jy, -jerk_max, jerk_max))
+
+        # RK4
+        k1 = _point_mass_ode_time(x, jx, jy, track_handler)
+        k2 = _point_mass_ode_time(x + 0.5 * h * k1, jx, jy, track_handler)
+        k3 = _point_mass_ode_time(x + 0.5 * h * k2, jx, jy, track_handler)
+        k4 = _point_mass_ode_time(x + h * k3, jx, jy, track_handler)
+        x = x + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+        # Clamp speed to positive
+        x[1] = max(x[1], 1.0)
+        # Wrap s
+        x[0] = x[0] % track_len
+
+    # Build output state dict (same format as perfect_tracking_update)
+    new_state = {}
+    new_state['s'] = float(x[0])
+    new_state['V'] = float(x[1])
+    new_state['n'] = float(x[2])
+    new_state['chi'] = float(x[3])
+    new_state['ax'] = float(x[4])
+    new_state['ay'] = float(x[5])
+
+    # Clamp n to track bounds (prevent ODE divergence escaping track)
+    s_mod = new_state['s'] % track_len
+    w_left = float(np.interp(s_mod, track_handler.s,
+                              track_handler.w_tr_left, period=track_len))
+    w_right = float(np.interp(s_mod, track_handler.s,
+                               track_handler.w_tr_right, period=track_len))
+    new_state['n'] = float(np.clip(new_state['n'],
+                                    w_right + 0.3,
+                                    w_left - 0.3))
+
+    # Cartesian position from (s, n)
+    xyz = track_handler.sn2cartesian(new_state['s'], new_state['n'])
+    new_state['x'] = float(xyz[0])
+    new_state['y'] = float(xyz[1])
+    new_state['z'] = float(xyz[2])
+    new_state['time_ns'] = time.time_ns()
+
+    # Temporal derivatives (consistent with ODE)
+    Omega_z = float(np.interp(s_mod, track_handler.s, track_handler.Omega_z,
+                               period=track_len))
+    denom = 1.0 - new_state['n'] * Omega_z
+    denom = max(abs(denom), 0.01) * (1.0 if denom >= 0 else -1.0)
+    new_state['s_dot'] = new_state['V'] * np.cos(new_state['chi']) / denom
+    new_state['n_dot'] = new_state['V'] * np.sin(new_state['chi'])
+    new_state['s_ddot'] = 0.0
+    new_state['n_ddot'] = 0.0
+
+    return new_state
+
+
+def run_simulation(n_steps: int = 1000, visualize: bool = True,
+                   use_dynamics: bool = False):
+    """Run the ACADOS-only simulation loop.
+
+    Args:
+        use_dynamics: If True, use point-mass ODE integration instead of
+                      perfect tracking for ego state update.
+    """
     cfg = TacticalConfig()
 
     # Load setup
@@ -199,6 +372,8 @@ def run_simulation(n_steps: int = 1000, visualize: bool = True):
     print("ACADOS-Only Simulation")
     print(f"  Horizon: {cfg.planning_horizon}s, Points: {cfg.n_trajectory_points}, "
           f"dt: {cfg.dt}s")
+    tracking_mode = "DYNAMICS (RK4+PD)" if use_dynamics else "PERFECT TRACKING"
+    print(f"  Ego update: {tracking_mode}")
     print("=" * 60)
 
     for step in range(n_steps):
@@ -221,10 +396,15 @@ def run_simulation(n_steps: int = 1000, visualize: bool = True):
         if visualize:
             viz.update(state, trajectory, guidance=guidance)
 
-        # Perfect tracking update
-        state = perfect_tracking_update(
-            state, trajectory, cfg.assumed_calc_time, track_handler
-        )
+        # Ego state update
+        if use_dynamics:
+            state = dynamics_tracking_update(
+                state, trajectory, cfg.assumed_calc_time, track_handler
+            )
+        else:
+            state = perfect_tracking_update(
+                state, trajectory, cfg.assumed_calc_time, track_handler
+            )
 
         # Lap timing
         if state['s'] > s_prev:
@@ -253,7 +433,7 @@ def run_simulation(n_steps: int = 1000, visualize: bool = True):
     return True
 
 
-def run_test(n_steps: int = 200):
+def run_test(n_steps: int = 200, use_dynamics: bool = False):
     """Headless test: verify ACADOS-only pipeline works."""
     cfg = TacticalConfig()
     params, track_handler, gg_handler, local_planner, global_planner = load_setup(cfg)
@@ -285,11 +465,17 @@ def run_test(n_steps: int = 200):
         if planner.planner_healthy:
             success_count += 1
 
-        state = perfect_tracking_update(
-            state, trajectory, cfg.assumed_calc_time, track_handler
-        )
+        if use_dynamics:
+            state = dynamics_tracking_update(
+                state, trajectory, cfg.assumed_calc_time, track_handler
+            )
+        else:
+            state = perfect_tracking_update(
+                state, trajectory, cfg.assumed_calc_time, track_handler
+            )
 
-    print(f"Test passed: {success_count}/{n_steps} steps with healthy planner")
+    print(f"Test passed: {success_count}/{n_steps} steps with healthy planner"
+          f" [{'dynamics' if use_dynamics else 'perfect'}]")
     return True
 
 
@@ -301,9 +487,12 @@ if __name__ == '__main__':
     N_STEPS = 999999        # Number of steps (set very large for unlimited)
     RUN_TEST = False        # Set to True for headless validation test
     TEST_STEPS = 200        # Number of test steps if RUN_TEST=True
+    USE_DYNAMICS = False    # True = point-mass ODE + PD controller;
+                            # False = perfect tracking (original)
     # ============================================================
 
     if RUN_TEST:
-        run_test(TEST_STEPS)
+        run_test(TEST_STEPS, use_dynamics=USE_DYNAMICS)
     else:
-        run_simulation(n_steps=N_STEPS, visualize=VISUALIZE)
+        run_simulation(n_steps=N_STEPS, visualize=VISUALIZE,
+                       use_dynamics=USE_DYNAMICS)

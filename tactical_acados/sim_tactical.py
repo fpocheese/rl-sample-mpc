@@ -37,7 +37,7 @@ from planner_guidance import TacticalToPlanner
 from opponent import OpponentVehicle
 from p2p import PushToPass
 from follow_module import FollowModule
-from sim_acados_only import load_setup, create_initial_state, perfect_tracking_update
+from sim_acados_only import load_setup, create_initial_state, perfect_tracking_update, dynamics_tracking_update
 from a2rl_obstacle_carver import A2RLObstacleCarver, CarverMode
 
 
@@ -53,6 +53,7 @@ def run_tactical_simulation(
         max_steps: int = 999999,
         visualize: bool = True,
         policy_type: str = 'heuristic',
+        use_dynamics: bool = False,
 ):
     """Run full tactical 3-car simulation."""
 
@@ -171,7 +172,8 @@ def run_tactical_simulation(
     print("=" * 70)
     print(f"Tactical Simulation: {sc['name']}")
     print(f"  Ego starts at s={ego_cfg['start_s']}, Opponents: {len(opponents)}")
-    print(f"  Policy: {policy_type}, Max steps: {max_steps}")
+    tracking_mode = "DYNAMICS (RK4+PD)" if use_dynamics else "PERFECT TRACKING"
+    print(f"  Policy: {policy_type}, Ego update: {tracking_mode}, Max steps: {max_steps}")
     print("=" * 70)
 
     collision_count = 0
@@ -290,9 +292,14 @@ def run_tactical_simulation(
         p2p.step(cfg.assumed_calc_time)
 
         # 9) Perfect tracking update for ego
-        ego_state = perfect_tracking_update(
-            ego_state, trajectory, cfg.assumed_calc_time, track_handler
-        )
+        if use_dynamics:
+            ego_state = dynamics_tracking_update(
+                ego_state, trajectory, cfg.assumed_calc_time, track_handler
+            )
+        else:
+            ego_state = perfect_tracking_update(
+                ego_state, trajectory, cfg.assumed_calc_time, track_handler
+            )
 
         # 10) Log
         log['step'].append(step)
@@ -388,6 +395,8 @@ if __name__ == '__main__':
                              'A-oursrl | oursrl | pure-rl | random')
     parser.add_argument('--max-steps', type=int, default=99999, help='Maximum simulation steps')
     parser.add_argument('--no-viz', action='store_true', help='Disable visualization')
+    parser.add_argument('--dynamics', action='store_true',
+                        help='Use point-mass ODE dynamics instead of perfect tracking')
     args = parser.parse_args()
 
     run_tactical_simulation(
@@ -395,4 +404,5 @@ if __name__ == '__main__':
         max_steps=args.max_steps,
         visualize=not args.no_viz,
         policy_type=args.policy,
+        use_dynamics=args.dynamics,
     )
