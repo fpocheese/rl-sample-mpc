@@ -740,54 +740,127 @@ class TacticalPlannerNode(Node):
         visualization_msgs/MarkerArray (LINE_STRIP)."""
         marker_arr = MarkerArray()
 
+        # Corridor arrays in Frenet n:
+        #   base_*   = static track bounds
+        #   dom_*    = active feasible-domain bounds (override if provided)
+        track_len = float(self.track_handler.s[-1])
+        s0 = float(ego['s'])
+        ds = float(self.cfg.optimization_horizon_m / self.cfg.N_steps_acados)
+
+        n_samples = int(self.cfg.N_steps_acados) + 1
+        s_arr = (s0 + np.arange(n_samples) * ds) % track_len
+
+        base_left = np.interp(
+            s_arr, self.track_handler.s, self.track_handler.w_tr_left,
+            period=track_len)
+        base_right = np.interp(
+            s_arr, self.track_handler.s, self.track_handler.w_tr_right,
+            period=track_len)
+
         w_left = getattr(guidance, 'n_left_override', None)
         w_right = getattr(guidance, 'n_right_override', None)
-        if w_left is None and w_right is None:
-            self.pub_domain.publish(marker_arr)
-            return
+
+        dom_left = np.asarray(base_left, dtype=float)
+        dom_right = np.asarray(base_right, dtype=float)
+
+        if w_left is not None:
+            src = np.asarray(w_left, dtype=float)
+            dom_left = np.interp(
+                np.linspace(0.0, 1.0, n_samples),
+                np.linspace(0.0, 1.0, len(src)),
+                src,
+            )
+        if w_right is not None:
+            src = np.asarray(w_right, dtype=float)
+            dom_right = np.interp(
+                np.linspace(0.0, 1.0, n_samples),
+                np.linspace(0.0, 1.0, len(src)),
+                src,
+            )
 
         stamp = self.get_clock().now().to_msg()
+        from geometry_msgs.msg import Point
 
-        for side_idx, (w_arr, color_g) in enumerate([
-            (w_left, 0.8),   # left  = green-ish
-            (w_right, 0.2),  # right = red-ish
-        ]):
-            if w_arr is None:
-                continue
-
+        def _build_line(marker_id: int, n_arr: np.ndarray,
+                        rgb: tuple, width: float, alpha: float,
+                        z_offset: float = 0.30) -> Marker:
             mk = Marker()
             mk.header.stamp = stamp
             mk.header.frame_id = 'map'
             mk.ns = 'feasible_domain'
-            mk.id = side_idx
+            mk.id = marker_id
             mk.type = Marker.LINE_STRIP
             mk.action = Marker.ADD
-            mk.scale.x = 0.25  # line width
+            mk.scale.x = width
+            mk.color.r, mk.color.g, mk.color.b = rgb
+            mk.color.a = alpha
 
-            mk.color.r = 1.0 - color_g
-            mk.color.g = color_g
-            mk.color.b = 0.2
-            mk.color.a = 0.8
-
-            s0 = ego['s']
-            ds = self.cfg.optimization_horizon_m / self.cfg.N_steps_acados
-            n_arr = np.asarray(w_arr)
-
-            for k in range(len(n_arr)):
-                s_k = (s0 + k * ds) % self.track_handler.s[-1]
-                n_k = float(n_arr[k])
+            for s_k, n_k in zip(s_arr, n_arr):
                 try:
-                    xyz = self.track_handler.sn2cartesian(s_k, n_k)
-                    from geometry_msgs.msg import Point
-                    p = Point()
-                    p.x = float(xyz[0])
-                    p.y = float(xyz[1])
-                    p.z = float(xyz[2]) + 0.3  # slightly above ground
-                    mk.points.append(p)
+                    xyz = self.track_handler.sn2cartesian(float(s_k), float(n_k))
                 except Exception:
-                    pass
+                    continue
+                p = Point()
+                p.x = float(xyz[0])
+                p.y = float(xyz[1])
+                p.z = float(xyz[2]) + z_offset
+                mk.points.append(p)
+            return mk
 
-            marker_arr.markers.append(mk)
+        # Base track bounds (always visible): light blue / light orange
+        marker_arr.markers.append(
+            _build_line(0, base_left, (0.20, 0.80, 1.00), 0.16, 0.45)
+        )
+        marker_arr.markers.append(
+            _build_line(1, base_right, (1.00, 0.65, 0.20), 0.16, 0.45)
+        )
+
+        # Active feasible-domain bounds (override or base): green / red
+        marker_arr.markers.append(
+            _build_line(10, dom_left, (0.20, 0.90, 0.20), 0.28, 0.90)
+        )
+        marker_arr.markers.append(
+            _build_line(11, dom_right, (0.95, 0.25, 0.25), 0.28, 0.90)
+        )
+
+        # Filled corridor (semi-transparent) for quick Foxglove diagnosis
+        fill = Marker()
+        fill.header.stamp = stamp
+        fill.header.frame_id = 'map'
+        fill.ns = 'feasible_domain'
+        fill.id = 20
+        fill.type = Marker.TRIANGLE_LIST
+        fill.action = Marker.ADD
+        fill.scale.x = 1.0
+        fill.scale.y = 1.0
+        fill.scale.z = 1.0
+        fill.color.r = 0.30
+        fill.color.g = 0.70
+        fill.color.b = 1.00
+        fill.color.a = 0.18
+
+        left_pts = []
+        right_pts = []
+        for s_k, nl_k, nr_k in zip(s_arr, dom_left, dom_right):
+            try:
+                xl = self.track_handler.sn2cartesian(float(s_k), float(nl_k))
+                xr = self.track_handler.sn2cartesian(float(s_k), float(nr_k))
+            except Exception:
+                continue
+            pl = Point()
+            pl.x, pl.y, pl.z = float(xl[0]), float(xl[1]), float(xl[2]) + 0.25
+            pr = Point()
+            pr.x, pr.y, pr.z = float(xr[0]), float(xr[1]), float(xr[2]) + 0.25
+            left_pts.append(pl)
+            right_pts.append(pr)
+
+        for k in range(min(len(left_pts), len(right_pts)) - 1):
+            # Triangle 1: Lk, Rk, Lk+1
+            fill.points.extend([left_pts[k], right_pts[k], left_pts[k + 1]])
+            # Triangle 2: Rk, Rk+1, Lk+1
+            fill.points.extend([right_pts[k], right_pts[k + 1], left_pts[k + 1]])
+
+        marker_arr.markers.append(fill)
 
         self.pub_domain.publish(marker_arr)
 
