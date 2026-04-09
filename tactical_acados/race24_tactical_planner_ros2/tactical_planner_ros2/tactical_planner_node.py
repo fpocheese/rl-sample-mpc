@@ -112,8 +112,8 @@ class TacticalPlannerNode(Node):
         self.declare_parameter('policy_type', 'heuristic')
         self.declare_parameter('force_side', 'none')
         self.declare_parameter('follow_when_forced', True)
-        self.declare_parameter('scenario', 'scenario_c')
         self.declare_parameter('timer_hz', 20.0)
+        self.declare_parameter('scenario', 'scenario_c')
         self.declare_parameter('track_name', 'yas_user_smoothed')
         self.declare_parameter('vehicle_name', 'eav25_car')
         self.declare_parameter('raceline_name',
@@ -122,7 +122,6 @@ class TacticalPlannerNode(Node):
         policy_type = self.get_parameter('policy_type').value
         force_side_str = self.get_parameter('force_side').value
         follow_when_forced = self.get_parameter('follow_when_forced').value
-        scenario_name = self.get_parameter('scenario').value
         timer_hz = self.get_parameter('timer_hz').value
         track_name = self.get_parameter('track_name').value
         vehicle_name = self.get_parameter('vehicle_name').value
@@ -258,15 +257,16 @@ class TacticalPlannerNode(Node):
         self.pub_thresholds = self.create_publisher(
             String, '/tactical_planner/thresholds', qos_reliable)
 
-        # ── Timer ────────────────────────────────────────────────────
-        period = 1.0 / max(timer_hz, 1.0)
-        self.timer = self.create_timer(period, self._timer_callback,
-                                       callback_group=self._timer_cb_group)
+        # ── Timer-driven planning ────────────────────────────────────
+        timer_period = 1.0 / max(timer_hz, 1.0)
+        self.timer = self.create_timer(
+            timer_period, self._timer_callback,
+            callback_group=self._timer_cb_group)
 
         self.get_logger().info(
             f'\033[1;33m[TacticalPlannerNode] started  '
             f'policy={policy_type}  force_side={force_side}  '
-            f'hz={timer_hz}  track={track_name}\033[0m')
+            f'timer={timer_hz:.0f}Hz  track={track_name}\033[0m')
 
     # ==================================================================
     # Subscriber Callbacks
@@ -360,8 +360,18 @@ class TacticalPlannerNode(Node):
     def _build_opp_states(self) -> list:
         """Convert GroundTruth detections to opponent state dicts.
 
-        GroundTruth provides *ego-local* del_x (forward), del_y (right).
-        We convert to global (x, y) then to Frenet (s, n).
+        Real V2V GroundTruth message fields:
+          del_x, del_y : position offset in ego body frame [m]
+                         (forward, rightward)
+          vx, vy       : *relative* velocity in ego body frame [m/s]
+                         (vx>0 = opponent moving forward relative to ego,
+                          i.e. pulling away; vx<0 = closing)
+          yaw          : *relative* heading angle [rad]
+                         defined as wrap(ego_yaw - opp_yaw), so
+                         opp_yaw_global = ego_yaw - gt.yaw
+
+        We convert everything to global (x, y, V_abs, yaw_abs) then to
+        Frenet (s, n, V, chi).
         """
         with self._data_lock:
             detections = list(self._opp_detections)
@@ -370,6 +380,7 @@ class TacticalPlannerNode(Node):
 
         ego_x = self._ego_state['x']
         ego_y = self._ego_state['y']
+        ego_V = self._ego_state['V']
         ego_yaw = math.atan2(
             self._ego_state.get('n_dot', 0.0),
             self._ego_state.get('s_dot', 1.0),
@@ -381,17 +392,54 @@ class TacticalPlannerNode(Node):
         cos_y = math.cos(ego_yaw)
         sin_y = math.sin(ego_yaw)
 
+        # Ego velocity in body frame for relative→absolute conversion
+        ego_vx_body = ego_V  # ego body-x ≈ forward speed (assuming small sideslip)
+        if self._ego_msg is not None:
+            # More precise: project global velocity into body frame
+            vx_global = float(self._ego_msg.velocity.x)
+            vy_global = float(self._ego_msg.velocity.y)
+            ego_vx_body = cos_y * vx_global + sin_y * vy_global
+            ego_vy_body = -sin_y * vx_global + cos_y * vy_global
+        else:
+            ego_vy_body = 0.0
+
         opp_list = []
         for i, gt in enumerate(detections):
             # del_x = forward, del_y = rightward in ego frame
             dx = float(gt.del_x)
-            dy = float(-gt.del_y)  # stored as -del_y = leftward (same as C++)
+            dy = float(-gt.del_y)  # negate: rightward→leftward (same as C++)
 
-            # ego-local → global
+            # ego-local → global position
             gx = ego_x + cos_y * dx - sin_y * dy
             gy = ego_y + sin_y * dx + cos_y * dy
 
-            opp_V = float(gt.vx)  # speed estimate
+            # --- Reconstruct opponent absolute velocity ---
+            # The simulator publishes absolute global velocity components
+            # (vx, vy) in the GroundTruth message. Prefer these values
+            # when present (compatibility with previous non-V2V flow).
+            if hasattr(gt, 'vx') and hasattr(gt, 'vy'):
+                # Message contains global velocity components already
+                opp_vx_global = float(gt.vx)
+                opp_vy_global = float(gt.vy)
+                opp_V = math.sqrt(opp_vx_global ** 2 + opp_vy_global ** 2)
+                # Derive heading from velocity vector (robust if vx,vy non-zero)
+                if opp_V > 1e-6:
+                    opp_yaw_global = math.atan2(opp_vy_global, opp_vx_global)
+                else:
+                    # fallback to using reported yaw if velocity is tiny
+                    opp_yaw_global = _wrap_angle(ego_yaw - float(gt.yaw))
+            else:
+                # Legacy: gt.vx/vy encode relative velocities in ego body frame
+                rel_vx = float(gt.vx)
+                rel_vy = float(gt.vy) if hasattr(gt, 'vy') else 0.0
+                opp_vx_body = rel_vx + ego_vx_body
+                opp_vy_body = rel_vy + ego_vy_body
+                # Rotate from ego body frame to global frame
+                opp_vx_global = cos_y * opp_vx_body - sin_y * opp_vy_body
+                opp_vy_global = sin_y * opp_vx_body + cos_y * opp_vy_body
+                opp_V = math.sqrt(opp_vx_global ** 2 + opp_vy_global ** 2)
+                # gt.yaw = wrap(ego_yaw - opp_yaw), so opp_yaw = ego_yaw - gt.yaw
+                opp_yaw_global = _wrap_angle(ego_yaw - float(gt.yaw))
 
             try:
                 sn = self.track_handler.cartesian2sn(gx, gy)
@@ -400,10 +448,16 @@ class TacticalPlannerNode(Node):
             except Exception:
                 continue
 
+            # Opponent chi = deviation from road tangent at opp position
+            road_heading_opp = float(np.interp(
+                opp_s, self.track_handler.s, self.track_handler.psi,
+                period=self.track_handler.s[-1]))
+            opp_chi = _wrap_angle(opp_yaw_global - road_heading_opp)
+
             opp_list.append({
                 'id': int(gt.car_num) if hasattr(gt, 'car_num') else i,
                 's': opp_s, 'n': opp_n, 'V': opp_V,
-                'chi': 0.0, 'ax': 0.0, 'ay': 0.0,
+                'chi': opp_chi, 'ax': 0.0, 'ay': 0.0,
                 'x': gx, 'y': gy, 'z': 0.0,
                 'tactic': 'unknown',
                 'target_n_offset': 0.0,

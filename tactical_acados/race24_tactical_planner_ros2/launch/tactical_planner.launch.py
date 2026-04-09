@@ -21,10 +21,11 @@ def generate_launch_description():
                               description='Force side: none / left / right'),
         DeclareLaunchArgument('follow_when_forced', default_value='true',
                               description='Avoid opponents when force_side is set'),
-        DeclareLaunchArgument('scenario', default_value='scenario_c',
-                              description='Scenario YAML name (for track/vehicle init)'),
         DeclareLaunchArgument('timer_hz', default_value='20.0',
-                              description='Planner loop frequency (Hz)'),
+                              description='Planning frequency (Hz)'),
+        DeclareLaunchArgument('scenario', default_value='scenario_c',
+                              description='Scenario name for sim_env_node '
+                              '(only used in simulation)'),
 
         Node(
             package='tactical_planner_ros2',
@@ -35,8 +36,8 @@ def generate_launch_description():
                 'policy_type': LaunchConfiguration('policy_type'),
                 'force_side': LaunchConfiguration('force_side'),
                 'follow_when_forced': LaunchConfiguration('follow_when_forced'),
-                'scenario': LaunchConfiguration('scenario'),
                 'timer_hz': LaunchConfiguration('timer_hz'),
+                'scenario': LaunchConfiguration('scenario'),
             }],
         ),
     ])

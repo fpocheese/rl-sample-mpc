@@ -32,7 +32,8 @@ from tactical_action import PlannerGuidance
 
 def load_setup(cfg: TacticalConfig, track_name: str = 'yas_user_smoothed',
                vehicle_name: str = 'eav25_car',
-               raceline_name: str = 'yasnorth_3d_rl_as_ref_eav25_car_gg_0.1'):
+               raceline_name: str = 'yasnorth_3d_rl_as_ref_eav25_car_gg_0.1',
+               init_local_planner: bool = True):
     """Load all required components."""
     data_path = os.path.join(project_root, 'data')
 
@@ -51,22 +52,24 @@ def load_setup(cfg: TacticalConfig, track_name: str = 'yas_user_smoothed',
     gg_path = os.path.join(data_path, 'gg_diagrams', vehicle_name, 'velocity_frame')
     gg_handler = GGManager(gg_path=gg_path, gg_margin=cfg.gg_margin)
 
-    # Point mass model
-    model = export_point_mass_ode_model(
-        vehicle_params=params['vehicle_params'],
-        track_handler=track_handler,
-        gg_handler=gg_handler,
-        optimization_horizon=cfg.optimization_horizon_m,
-    )
+    local_planner = None
+    if init_local_planner:
+        # Point mass model
+        model = export_point_mass_ode_model(
+            vehicle_params=params['vehicle_params'],
+            track_handler=track_handler,
+            gg_handler=gg_handler,
+            optimization_horizon=cfg.optimization_horizon_m,
+        )
 
-    # Local raceline planner (ACADOS)
-    local_planner = LocalRacinglinePlanner(
-        params=params,
-        track_handler=track_handler,
-        gg_handler=gg_handler,
-        model=model,
-        optimization_horizon=cfg.optimization_horizon_m,
-    )
+        # Local raceline planner (ACADOS)
+        local_planner = LocalRacinglinePlanner(
+            params=params,
+            track_handler=track_handler,
+            gg_handler=gg_handler,
+            model=model,
+            optimization_horizon=cfg.optimization_horizon_m,
+        )
 
     # Global raceline planner (for reference / fallback)
     racing_line_path = os.path.join(data_path, 'global_racing_lines',

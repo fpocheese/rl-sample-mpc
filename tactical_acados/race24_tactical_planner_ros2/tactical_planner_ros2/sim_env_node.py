@@ -155,6 +155,7 @@ class SimEnvNode(Node):
                 track_name=track_name,
                 vehicle_name=vehicle_name,
                 raceline_name=raceline_name,
+                init_local_planner=False,
             )
 
         # ── Initial ego state ────────────────────────────────────────
@@ -272,15 +273,16 @@ class SimEnvNode(Node):
 
         self.get_logger().info(
             f'\033[1;36m[SimEnv] started  scenario={scenario_name}  '
-            f'opponents={len(self.opponents)}  mode=event-driven\033[0m')
+            f'opponents={len(self.opponents)}\033[0m')
 
     # ==================================================================
     #  Kick-start (one-shot)
     # ==================================================================
 
     def _kickstart_cb(self):
-        """Publish initial ego/opp data so the planner has something to
-        plan on.  Then cancel this timer — the rest is event-driven."""
+        """Publish initial ego data so the planner has something to
+        plan on.  Then cancel this timer.
+        """
         self._kickstart_timer.cancel()
         self.get_logger().info(
             '[SimEnv] Publishing initial ego/opp data to trigger planner...')
@@ -487,7 +489,7 @@ class SimEnvNode(Node):
 
         self._step += 1
 
-        # ── Re-publish ego / opponents → triggers next planner cycle ─
+        # ── Re-publish ego / opponents → planner reads on next tick ──
         self._publish_localization()
         self._publish_ego_state()
         self._publish_opponents()
@@ -548,11 +550,14 @@ class SimEnvNode(Node):
     def _publish_opponents(self):
         """Publish autonoma_msgs/GroundTruthArray.
 
-        Convention (matching planner.cpp & tactical_planner_node):
-          del_x = forward distance in ego body frame
-          del_y = rightward distance in ego body frame (stored as -del_y
-                  in the node, so we store the *positive right* value)
-          vx    = opponent speed estimate
+        Real V2V message semantics:
+          del_x = forward distance in ego body frame [m] (positive = ahead)
+          del_y = rightward distance in ego body frame [m] (positive = right)
+          vx    = *relative* longitudinal velocity in ego body frame [m/s]
+                  (opp_vx_body_proj - ego_vx_body)
+          vy    = *relative* lateral velocity in ego body frame [m/s]
+                  (opp_vy_body_proj - ego_vy_body)
+          yaw   = *relative* heading: wrap(ego_yaw - opp_yaw) [rad]
           car_num = opponent ID
         """
         arr = GroundTruthArray()
@@ -564,17 +569,21 @@ class SimEnvNode(Node):
             s, self.track_handler.s, self.track_handler.psi,
             period=self.track_handler.s[-1]))
         ego_yaw = road_yaw + self.ego['chi']
+        ego_V = self.ego['V']
+        ego_chi = self.ego['chi']
 
         cos_y = math.cos(ego_yaw)
         sin_y = math.sin(ego_yaw)
+
+        # Ego velocity in body frame
+        ego_vx_body = ego_V * math.cos(ego_chi)  # forward component
+        ego_vy_body = ego_V * math.sin(ego_chi)   # lateral component (≈0 small chi)
 
         for opp in self.opponents:
             gt = GroundTruth()
             gt.car_num = opp.vehicle_id
 
-            # global → ego body-local
-            #   body x-axis = forward = (cos_y, sin_y)
-            #   body y-axis = rightward = (sin_y, -cos_y)   [NED-like]
+            # ---- Position: global → ego body-local ----
             dx_global = opp.x - ego_x
             dy_global = opp.y - ego_y
             del_x_local = cos_y * dx_global + sin_y * dy_global   # forward
@@ -582,13 +591,34 @@ class SimEnvNode(Node):
 
             gt.del_x = float(del_x_local)     # forward  (positive = ahead)
             gt.del_y = float(del_y_local)      # rightward (positive = right)
-            gt.vx = float(opp.V)               # speed estimate
 
-            # Also fill yaw (not strictly needed by our node but good practice)
+            # ---- Velocity: compute opponent global vel, project to ego body,
+            #      subtract ego body vel → relative velocity ----
             opp_road_yaw = float(np.interp(
                 opp.s, self.track_handler.s, self.track_handler.psi,
                 period=self.track_handler.s[-1]))
-            gt.yaw = float(opp_road_yaw)
+            opp_yaw_global = opp_road_yaw + opp.chi
+
+            opp_vx_global = opp.V * math.cos(opp_yaw_global)
+            opp_vy_global = opp.V * math.sin(opp_yaw_global)
+
+            # Project opponent global velocity into ego body frame
+            opp_vx_in_ego_body = cos_y * opp_vx_global + sin_y * opp_vy_global
+            opp_vy_in_ego_body = sin_y * opp_vx_global - cos_y * opp_vy_global
+
+            # Publish absolute opponent global velocity components (m/s)
+            # Previous versions of the tactical stack expected absolute
+            # velocity components; publish those to maintain compatibility.
+            gt.vx = float(opp_vx_global)
+            gt.vy = float(opp_vy_global)
+            gt.vz = 0.0
+
+            # ---- Heading: relative yaw = wrap(ego_yaw - opp_yaw) ----
+            gt.yaw = float(_wrap(ego_yaw - opp_yaw_global))
+
+            gt.pitch = 0.0
+            gt.roll = 0.0
+            gt.del_z = 0.0
 
             arr.vehicles.append(gt)
 
