@@ -58,7 +58,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 
-from std_msgs.msg import String, Bool, Float64MultiArray
+from std_msgs.msg import String, Bool, Float64MultiArray, Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 
 # a2rl / autonoma message types
@@ -252,7 +252,7 @@ class TacticalPlannerNode(Node):
             String, '/tactical_planner/fsm_state', qos_reliable)
 
         self.pub_domain = self.create_publisher(
-            MarkerArray, '/tactical_planner/feasible_domain', qos_reliable)
+            Float32MultiArray, '/tactical_planner/corridor', qos_reliable)
 
         self.pub_thresholds = self.create_publisher(
             String, '/tactical_planner/thresholds', qos_reliable)
@@ -304,7 +304,14 @@ class TacticalPlannerNode(Node):
     # ==================================================================
 
     def _build_ego_state(self) -> Optional[dict]:
-        """Convert latest Localization + EgoState messages to ego_state dict."""
+        """Convert latest Localization + EgoState messages to ego_state dict.
+
+        CRITICAL: The ACADOS OCP model uses Frenet-frame accelerations:
+          ax = longitudinal accel along track tangent  (ds/dt derivative)
+          ay = lateral accel perpendicular to tangent   (centripetal component)
+        The EgoState message provides body-frame accelerations, so we must
+        rotate them from body frame → global frame → Frenet frame.
+        """
         with self._data_lock:
             lc = self._loc_msg
             eg = self._ego_msg
@@ -319,8 +326,10 @@ class TacticalPlannerNode(Node):
         vx = float(eg.velocity.x)
         vy = float(eg.velocity.y)
         V = math.sqrt(vx * vx + vy * vy)
-        ax_body = float(eg.acceleration.x)
-        ay_body = float(eg.acceleration.y)
+
+        # --- Body-frame accelerations from IMU / observer ---
+        ax_body = float(eg.acceleration.x)  # forward in body
+        ay_body = float(eg.acceleration.y)  # leftward in body
 
         # Convert to Frenet via track_handler
         try:
@@ -345,9 +354,19 @@ class TacticalPlannerNode(Node):
         s_dot = V * math.cos(chi) / max(1.0 - n * Omega_z, 0.01)
         n_dot = V * math.sin(chi)
 
+        # --- Convert body-frame accel → Frenet accel ---
+        # Body frame is rotated by `chi` relative to Frenet tangent.
+        #   ax_frenet = ax_body * cos(chi) - ay_body * sin(chi)
+        #   ay_frenet = ax_body * sin(chi) + ay_body * cos(chi)
+        # This is the same rotation used in the OCP model.
+        cos_chi = math.cos(chi)
+        sin_chi = math.sin(chi)
+        ax_frenet = ax_body * cos_chi - ay_body * sin_chi
+        ay_frenet = ax_body * sin_chi + ay_body * cos_chi
+
         return {
             's': s, 'n': n, 'V': V,
-            'chi': chi, 'ax': ax_body, 'ay': ay_body,
+            'chi': chi, 'ax': ax_frenet, 'ay': ay_frenet,
             'x': x, 'y': y, 'z': z,
             's_dot': s_dot, 'n_dot': n_dot,
             'time_ns': int(lc.timestamp.nanoseconds),
@@ -360,15 +379,11 @@ class TacticalPlannerNode(Node):
     def _build_opp_states(self) -> list:
         """Convert GroundTruth detections to opponent state dicts.
 
-        Real V2V GroundTruth message fields:
-          del_x, del_y : position offset in ego body frame [m]
-                         (forward, rightward)
-          vx, vy       : *relative* velocity in ego body frame [m/s]
-                         (vx>0 = opponent moving forward relative to ego,
-                          i.e. pulling away; vx<0 = closing)
-          yaw          : *relative* heading angle [rad]
-                         defined as wrap(ego_yaw - opp_yaw), so
-                         opp_yaw_global = ego_yaw - gt.yaw
+        GroundTruth message fields (from autonoma_msgs):
+          del_x, del_y, del_z : position offset in **ego** body frame [m]
+          vx, vy, vz          : velocity in **opponent's own** body frame [m/s]
+          yaw                  : **global absolute** heading [rad from North, CCW+]
+          car_num              : opponent vehicle ID
 
         We convert everything to global (x, y, V_abs, yaw_abs) then to
         Frenet (s, n, V, chi).
@@ -381,31 +396,21 @@ class TacticalPlannerNode(Node):
         ego_x = self._ego_state['x']
         ego_y = self._ego_state['y']
         ego_V = self._ego_state['V']
-        ego_yaw = math.atan2(
-            self._ego_state.get('n_dot', 0.0),
-            self._ego_state.get('s_dot', 1.0),
-        )
-        # Better: use localization yaw directly
+        # Use localization yaw directly (most reliable source)
         if self._loc_msg is not None:
             ego_yaw = float(self._loc_msg.orientation_ypr.z)
+        else:
+            ego_yaw = math.atan2(
+                self._ego_state.get('n_dot', 0.0),
+                self._ego_state.get('s_dot', 1.0),
+            )
 
         cos_y = math.cos(ego_yaw)
         sin_y = math.sin(ego_yaw)
 
-        # Ego velocity in body frame for relative→absolute conversion
-        ego_vx_body = ego_V  # ego body-x ≈ forward speed (assuming small sideslip)
-        if self._ego_msg is not None:
-            # More precise: project global velocity into body frame
-            vx_global = float(self._ego_msg.velocity.x)
-            vy_global = float(self._ego_msg.velocity.y)
-            ego_vx_body = cos_y * vx_global + sin_y * vy_global
-            ego_vy_body = -sin_y * vx_global + cos_y * vy_global
-        else:
-            ego_vy_body = 0.0
-
         opp_list = []
         for i, gt in enumerate(detections):
-            # del_x = forward, del_y = rightward in ego frame
+            # --- Position: del_x/del_y are in ego body frame ---
             dx = float(gt.del_x)
             dy = float(-gt.del_y)  # negate: rightward→leftward (same as C++)
 
@@ -413,33 +418,20 @@ class TacticalPlannerNode(Node):
             gx = ego_x + cos_y * dx - sin_y * dy
             gy = ego_y + sin_y * dx + cos_y * dy
 
-            # --- Reconstruct opponent absolute velocity ---
-            # The simulator publishes absolute global velocity components
-            # (vx, vy) in the GroundTruth message. Prefer these values
-            # when present (compatibility with previous non-V2V flow).
-            if hasattr(gt, 'vx') and hasattr(gt, 'vy'):
-                # Message contains global velocity components already
-                opp_vx_global = float(gt.vx)
-                opp_vy_global = float(gt.vy)
-                opp_V = math.sqrt(opp_vx_global ** 2 + opp_vy_global ** 2)
-                # Derive heading from velocity vector (robust if vx,vy non-zero)
-                if opp_V > 1e-6:
-                    opp_yaw_global = math.atan2(opp_vy_global, opp_vx_global)
-                else:
-                    # fallback to using reported yaw if velocity is tiny
-                    opp_yaw_global = _wrap_angle(ego_yaw - float(gt.yaw))
-            else:
-                # Legacy: gt.vx/vy encode relative velocities in ego body frame
-                rel_vx = float(gt.vx)
-                rel_vy = float(gt.vy) if hasattr(gt, 'vy') else 0.0
-                opp_vx_body = rel_vx + ego_vx_body
-                opp_vy_body = rel_vy + ego_vy_body
-                # Rotate from ego body frame to global frame
-                opp_vx_global = cos_y * opp_vx_body - sin_y * opp_vy_body
-                opp_vy_global = sin_y * opp_vx_body + cos_y * opp_vy_body
-                opp_V = math.sqrt(opp_vx_global ** 2 + opp_vy_global ** 2)
-                # gt.yaw = wrap(ego_yaw - opp_yaw), so opp_yaw = ego_yaw - gt.yaw
-                opp_yaw_global = _wrap_angle(ego_yaw - float(gt.yaw))
+            # --- Opponent heading (global absolute) ---
+            # gt.yaw is global absolute heading (rad from North, CCW+)
+            opp_yaw_global = float(gt.yaw)
+
+            # --- Opponent speed ---
+            # gt.vx/vy are in opponent's OWN body frame.
+            # Rotate to global frame using opponent's global yaw.
+            opp_vx_body = float(gt.vx)   # forward in opp body
+            opp_vy_body = float(gt.vy)   # leftward in opp body
+            cos_opp = math.cos(opp_yaw_global)
+            sin_opp = math.sin(opp_yaw_global)
+            opp_vx_global = cos_opp * opp_vx_body - sin_opp * opp_vy_body
+            opp_vy_global = sin_opp * opp_vx_body + cos_opp * opp_vy_body
+            opp_V = math.sqrt(opp_vx_global ** 2 + opp_vy_global ** 2)
 
             try:
                 sn = self.track_handler.cartesian2sn(gx, gy)
@@ -488,12 +480,45 @@ class TacticalPlannerNode(Node):
         # 2) build opponent states
         opp_states = self._build_opp_states()
 
-        # Provide simple predictions (constant s, n for 1-step)
+        # Provide constant-velocity predictions over the planning horizon.
+        # The test script (sim_tactical.py) uses OpponentVehicle.predict()
+        # which generates a multi-step trajectory.  For real-time we
+        # approximate with straight-line constant-speed prediction in
+        # Frenet coordinates, matching the carver's expectation.
+        n_pred_steps = 10  # ~1.25s at dt=0.125
+        pred_dt = self.cfg.dt
         for os_d in opp_states:
-            os_d['pred_s'] = np.array([os_d['s']])
-            os_d['pred_n'] = np.array([os_d['n']])
-            os_d['pred_x'] = np.array([os_d['x']])
-            os_d['pred_y'] = np.array([os_d['y']])
+            opp_V = os_d['V']
+            opp_s = os_d['s']
+            opp_n = os_d['n']
+            opp_chi = os_d.get('chi', 0.0)
+
+            # Compute opp s_dot in Frenet
+            opp_Omega_z = float(np.interp(
+                opp_s, self.track_handler.s, self.track_handler.Omega_z,
+                period=self.track_handler.s[-1]))
+            opp_s_dot = opp_V * math.cos(opp_chi) / max(1.0 - opp_n * opp_Omega_z, 0.01)
+            opp_n_dot = opp_V * math.sin(opp_chi)
+
+            pred_s = np.array([opp_s + opp_s_dot * pred_dt * k
+                               for k in range(n_pred_steps)])
+            pred_s = pred_s % self.track_handler.s[-1]
+            pred_n = np.array([opp_n + opp_n_dot * pred_dt * k
+                               for k in range(n_pred_steps)])
+            # Convert to Cartesian for carver
+            try:
+                pred_xy = self.track_handler.sn2cartesian(pred_s, pred_n)
+                if pred_xy.ndim == 1:
+                    pred_xy = pred_xy.reshape(1, -1)
+                os_d['pred_s'] = pred_s
+                os_d['pred_n'] = pred_n
+                os_d['pred_x'] = pred_xy[:, 0]
+                os_d['pred_y'] = pred_xy[:, 1]
+            except Exception:
+                os_d['pred_s'] = np.array([opp_s])
+                os_d['pred_n'] = np.array([opp_n])
+                os_d['pred_x'] = np.array([os_d['x']])
+                os_d['pred_y'] = np.array([os_d['y']])
 
         # 3) build observation
         obs = build_observation(
@@ -561,6 +586,7 @@ class TacticalPlannerNode(Node):
         self._publish_fsm_state(action, guidance)
         self._publish_thresholds()
         self._publish_feasible_domain(guidance, ego)
+        self._publish_corridor_data(guidance, ego)
 
         self.prev_action = action
         self._step += 1
@@ -569,10 +595,23 @@ class TacticalPlannerNode(Node):
             ph = getattr(self.policy, 'debug_info', {}).get('phase', '?')
             gap = getattr(self.policy, 'debug_info', {}).get('gap', None)
             gap_s = f'{gap:.1f}' if gap else 'N/A'
+            dbg = getattr(self.planner, 'debug_log', {})
+            fallback = dbg.get('used_fallback', False)
+            consec_fail = dbg.get('_consecutive_failures', 0)
+            v_max_eff = guidance.get_effective_v_max(
+                self.params['vehicle_params'].get('v_max', 90.0), self.cfg)
+            traj_v0 = trajectory['V'][0] if len(trajectory['V']) > 0 else 0.0
+            traj_vN = trajectory['V'][-1] if len(trajectory['V']) > 0 else 0.0
             self.get_logger().info(
                 f'[{self._step:5d}] s={ego["s"]:.1f} n={ego["n"]:.2f} '
-                f'V={ego["V"]:.1f} | {ph} gap={gap_s} | '
-                f'{c_mode.name} {c_side or ""} | {t_plan*1000:.0f}ms')
+                f'V={ego["V"]:.1f} chi={ego["chi"]:.3f} '
+                f'ax={ego["ax"]:.2f} ay={ego["ay"]:.2f} | '
+                f'{ph} gap={gap_s} | '
+                f'{c_mode.name} {c_side or ""} | '
+                f'traj_V=[{traj_v0:.1f}..{traj_vN:.1f}] vmax={v_max_eff:.1f} '
+                f'healthy={self.planner.planner_healthy} '
+                f'fallback={fallback} fail={consec_fail} | '
+                f'{t_plan*1000:.0f}ms')
 
     # ==================================================================
     # Publishers
@@ -736,19 +775,31 @@ class TacticalPlannerNode(Node):
         self.pub_thresholds.publish(msg)
 
     def _publish_feasible_domain(self, guidance, ego):
-        """Publish feasible domain boundaries as Foxglove-compatible
-        visualization_msgs/MarkerArray (LINE_STRIP)."""
-        marker_arr = MarkerArray()
+        """DEPRECATED: feasible domain visualization moved to planner_cvxopt.
+        Kept as no-op stub for compatibility."""
+        pass
 
-        # Corridor arrays in Frenet n:
-        #   base_*   = static track bounds
-        #   dom_*    = active feasible-domain bounds (override if provided)
+    def _publish_corridor_data(self, guidance, ego):
+        """Publish corridor boundary data as Float32MultiArray to planner_cvxopt.
+
+        The planner_cvxopt node receives this and renders the feasible-domain
+        MarkerArray using its own track data (yasnorth_map_sim.csv), ensuring
+        the visualization is consistent with /flyeagle/global_path.
+
+        Format  (all float32):
+          data[0]         = N   (number of sample points along horizon)
+          data[1..3N]     = active_left  polyline: x0,y0,z0, x1,y1,z1, ...
+          data[3N+1..6N]  = active_right polyline: x0,y0,z0, x1,y1,z1, ...
+          data[6N+1..9N]  = base_left    polyline: x0,y0,z0, x1,y1,z1, ...
+          data[9N+1..12N] = base_right   polyline: x0,y0,z0, x1,y1,z1, ...
+        """
         track_len = float(self.track_handler.s[-1])
         s0 = float(ego['s'])
         ds = float(self.cfg.optimization_horizon_m / self.cfg.N_steps_acados)
 
         n_samples = int(self.cfg.N_steps_acados) + 1
-        s_arr = (s0 + np.arange(n_samples) * ds) % track_len
+        s_arr_raw = s0 + np.arange(n_samples) * ds
+        s_arr = s_arr_raw % track_len
 
         base_left = np.interp(
             s_arr, self.track_handler.s, self.track_handler.w_tr_left,
@@ -767,102 +818,34 @@ class TacticalPlannerNode(Node):
             src = np.asarray(w_left, dtype=float)
             dom_left = np.interp(
                 np.linspace(0.0, 1.0, n_samples),
-                np.linspace(0.0, 1.0, len(src)),
-                src,
-            )
+                np.linspace(0.0, 1.0, len(src)), src)
         if w_right is not None:
             src = np.asarray(w_right, dtype=float)
             dom_right = np.interp(
                 np.linspace(0.0, 1.0, n_samples),
-                np.linspace(0.0, 1.0, len(src)),
-                src,
-            )
+                np.linspace(0.0, 1.0, len(src)), src)
 
-        stamp = self.get_clock().now().to_msg()
-        from geometry_msgs.msg import Point
-
-        def _build_line(marker_id: int, n_arr: np.ndarray,
-                        rgb: tuple, width: float, alpha: float,
-                        z_offset: float = 0.30) -> Marker:
-            mk = Marker()
-            mk.header.stamp = stamp
-            mk.header.frame_id = 'map'
-            mk.ns = 'feasible_domain'
-            mk.id = marker_id
-            mk.type = Marker.LINE_STRIP
-            mk.action = Marker.ADD
-            mk.scale.x = width
-            mk.color.r, mk.color.g, mk.color.b = rgb
-            mk.color.a = alpha
-
-            for s_k, n_k in zip(s_arr, n_arr):
+        # Convert all 4 boundary lines to XYZ
+        def _sn_to_xyz_array(s_arr, n_arr, z_offset=0.30):
+            out = []
+            for s_v, n_v in zip(s_arr, n_arr):
                 try:
-                    xyz = self.track_handler.sn2cartesian(float(s_k), float(n_k))
+                    xyz = self.track_handler.sn2cartesian(float(s_v), float(n_v))
+                    out.extend([float(xyz[0]), float(xyz[1]),
+                                float(xyz[2]) + z_offset])
                 except Exception:
-                    continue
-                p = Point()
-                p.x = float(xyz[0])
-                p.y = float(xyz[1])
-                p.z = float(xyz[2]) + z_offset
-                mk.points.append(p)
-            return mk
+                    out.extend([0.0, 0.0, 0.0])
+            return out
 
-        # Base track bounds (always visible): light blue / light orange
-        marker_arr.markers.append(
-            _build_line(0, base_left, (0.20, 0.80, 1.00), 0.16, 0.45)
-        )
-        marker_arr.markers.append(
-            _build_line(1, base_right, (1.00, 0.65, 0.20), 0.16, 0.45)
-        )
+        buf = [float(n_samples)]
+        buf.extend(_sn_to_xyz_array(s_arr, dom_left))
+        buf.extend(_sn_to_xyz_array(s_arr, dom_right))
+        buf.extend(_sn_to_xyz_array(s_arr, base_left))
+        buf.extend(_sn_to_xyz_array(s_arr, base_right))
 
-        # Active feasible-domain bounds (override or base): green / red
-        marker_arr.markers.append(
-            _build_line(10, dom_left, (0.20, 0.90, 0.20), 0.28, 0.90)
-        )
-        marker_arr.markers.append(
-            _build_line(11, dom_right, (0.95, 0.25, 0.25), 0.28, 0.90)
-        )
-
-        # Filled corridor (semi-transparent) for quick Foxglove diagnosis
-        fill = Marker()
-        fill.header.stamp = stamp
-        fill.header.frame_id = 'map'
-        fill.ns = 'feasible_domain'
-        fill.id = 20
-        fill.type = Marker.TRIANGLE_LIST
-        fill.action = Marker.ADD
-        fill.scale.x = 1.0
-        fill.scale.y = 1.0
-        fill.scale.z = 1.0
-        fill.color.r = 0.30
-        fill.color.g = 0.70
-        fill.color.b = 1.00
-        fill.color.a = 0.18
-
-        left_pts = []
-        right_pts = []
-        for s_k, nl_k, nr_k in zip(s_arr, dom_left, dom_right):
-            try:
-                xl = self.track_handler.sn2cartesian(float(s_k), float(nl_k))
-                xr = self.track_handler.sn2cartesian(float(s_k), float(nr_k))
-            except Exception:
-                continue
-            pl = Point()
-            pl.x, pl.y, pl.z = float(xl[0]), float(xl[1]), float(xl[2]) + 0.25
-            pr = Point()
-            pr.x, pr.y, pr.z = float(xr[0]), float(xr[1]), float(xr[2]) + 0.25
-            left_pts.append(pl)
-            right_pts.append(pr)
-
-        for k in range(min(len(left_pts), len(right_pts)) - 1):
-            # Triangle 1: Lk, Rk, Lk+1
-            fill.points.extend([left_pts[k], right_pts[k], left_pts[k + 1]])
-            # Triangle 2: Rk, Rk+1, Lk+1
-            fill.points.extend([right_pts[k], right_pts[k + 1], left_pts[k + 1]])
-
-        marker_arr.markers.append(fill)
-
-        self.pub_domain.publish(marker_arr)
+        msg = Float32MultiArray()
+        msg.data = [float(v) for v in buf]
+        self.pub_domain.publish(msg)
 
 
 # ======================================================================

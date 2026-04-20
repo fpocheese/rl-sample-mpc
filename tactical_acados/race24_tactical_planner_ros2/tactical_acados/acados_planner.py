@@ -104,7 +104,7 @@ class AcadosTacticalPlanner:
             # A stale bad solution causes solver divergence to cascade (snowball effect).
             if self._consecutive_failures >= 2:
                 self._prev_solution = None
-            return self._generate_fallback(state)
+            return self._generate_fallback(state, guidance)
 
     def _try_plan(
             self,
@@ -254,13 +254,33 @@ class AcadosTacticalPlanner:
         self.debug_log['applied_terminal_bias'] = True
         self.debug_log['bias_gain'] = 1.0
 
-        # Clip to track bounds
+        # Clip to corridor bounds (prefer guidance overrides over base track)
         s_arr = trajectory['s']
-        w_left = np.interp(s_arr, self.track_handler.s, self.track_handler.w_tr_left,
-                           period=self.track_handler.s[-1])
-        w_right = np.interp(s_arr, self.track_handler.s, self.track_handler.w_tr_right,
-                            period=self.track_handler.s[-1])
         vw = self.vehicle_params.get('total_width', 1.93) / 2.0
+
+        n_left_ov = getattr(guidance, 'n_left_override', None)
+        n_right_ov = getattr(guidance, 'n_right_override', None)
+
+        if n_left_ov is not None:
+            # Interpolate overrides to trajectory s positions
+            s0 = s_arr[0]
+            horizon = self.cfg.optimization_horizon_m
+            s_ov = np.linspace(s0, s0 + horizon, len(n_left_ov))
+            w_left = np.interp(s_arr, s_ov, n_left_ov)
+        else:
+            w_left = np.interp(s_arr, self.track_handler.s,
+                               self.track_handler.w_tr_left,
+                               period=self.track_handler.s[-1])
+
+        if n_right_ov is not None:
+            s0 = s_arr[0]
+            horizon = self.cfg.optimization_horizon_m
+            s_ov = np.linspace(s0, s0 + horizon, len(n_right_ov))
+            w_right = np.interp(s_arr, s_ov, n_right_ov)
+        else:
+            w_right = np.interp(s_arr, self.track_handler.s,
+                                self.track_handler.w_tr_right,
+                                period=self.track_handler.s[-1])
 
         new_n = trajectory['n'] + n_bias
         new_n = np.clip(new_n, w_right + vw + 0.2, w_left - vw - 0.2)
@@ -277,13 +297,17 @@ class AcadosTacticalPlanner:
 
         return trajectory
 
-    def _generate_fallback(self, state: dict) -> dict:
+    def _generate_fallback(self, state: dict, guidance=None) -> dict:
         """
         Generate fallback trajectory.
         - consecutive_failures < 5: roll previous trajectory (mild hiccup)
         - consecutive_failures >= 5: generate recovery trajectory that
           straightens chi towards 0 while keeping current n.
           This prevents the "stuck in bad state" death spiral.
+
+        The trajectory n is always clipped to the feasible domain given by
+        guidance.n_left_override / n_right_override (if available) so that
+        the published fallback path stays inside the corridor.
         """
         N = self.cfg.n_trajectory_points
         dt = self.cfg.dt
@@ -291,7 +315,7 @@ class AcadosTacticalPlanner:
 
         # === Recovery mode: straighten chi, keep n, drive forward ===
         if self._consecutive_failures >= 5:
-            traj = self._generate_recovery_trajectory(state)
+            traj = self._generate_recovery_trajectory(state, guidance)
             self._prev_trajectory = traj  # update so next roll uses recovery
             return traj
 
@@ -306,15 +330,21 @@ class AcadosTacticalPlanner:
                     traj[key] = rolled
                 else:
                     traj[key] = val
+
+            # Clip n to corridor and recompute Cartesian
+            traj = self._clip_to_corridor(traj, state, guidance)
             return traj
 
         # Absolute cold fallback if no history
-        return self._generate_recovery_trajectory(state)
+        return self._generate_recovery_trajectory(state, guidance)
 
-    def _generate_recovery_trajectory(self, state: dict) -> dict:
+    def _generate_recovery_trajectory(self, state: dict, guidance=None) -> dict:
         """Generate a recovery trajectory that gradually straightens chi→0,
         keeps current n (safe — don't drift into opponents), and drives forward
         at reduced speed.
+        
+        The n values are clipped to the corridor given by guidance so that
+        the fallback path stays inside the feasible domain.
         
         This breaks the death spiral where large chi + low speed causes
         infinite consecutive planner failures.
@@ -367,7 +397,7 @@ class AcadosTacticalPlanner:
         s_dot = v_out * np.cos(chi_out) / np.maximum(1.0 - n_out * Omega_z_arr, 0.3)
         n_dot = v_out * np.sin(chi_out)
 
-        return {
+        result = {
             't': t_out,
             's': s_wrapped,
             'n': n_out,
@@ -383,6 +413,80 @@ class AcadosTacticalPlanner:
             's_ddot': np.zeros(N),
             'n_ddot': np.zeros(N),
         }
+
+        # Clip n to feasible corridor and recompute Cartesian
+        return self._clip_to_corridor(result, state, guidance)
+
+    def _clip_to_corridor(self, traj: dict, state: dict, guidance=None) -> dict:
+        """Clip trajectory n to the feasible corridor defined by guidance
+        overrides (or base track bounds), then recompute Cartesian coordinates.
+
+        This ensures fallback/recovery trajectories stay inside the corridor
+        visible in Foxglove, matching the same bounds the ACADOS solver uses.
+        """
+        if guidance is None:
+            return traj
+
+        n_left = getattr(guidance, 'n_left_override', None)
+        n_right = getattr(guidance, 'n_right_override', None)
+
+        if n_left is None and n_right is None:
+            return traj
+
+        N = len(traj['n'])
+        track_len = self.track_handler.s[-1]
+        vw = self.vehicle_params.get('total_width', 1.93) / 2.0
+        safety = getattr(guidance, 'safety_distance',
+                         self.cfg.safety_distance_default)
+
+        # Build n bounds for each trajectory point
+        s_traj = traj['s']  # wrapped s values
+
+        # Corridor arrays from guidance are defined over the optimization
+        # horizon starting at the current ego s.
+        s0 = state['s']
+        horizon = self.cfg.optimization_horizon_m
+        n_override = len(n_left) if n_left is not None else (
+            len(n_right) if n_right is not None else N)
+        # s grid that the overrides correspond to (same as carver)
+        s_override = np.linspace(s0, s0 + horizon, n_override)
+
+        n_arr = traj['n'].copy()
+        clipped = False
+
+        for i in range(N):
+            s_i = s_traj[i]
+            # Handle wrap-around: unwrap s_i relative to s0
+            s_unwrapped = s_i
+            if s_unwrapped < s0 - track_len / 2:
+                s_unwrapped += track_len
+
+            if n_left is not None:
+                nl = float(np.interp(s_unwrapped, s_override, n_left))
+                ub = nl - vw - safety
+                if n_arr[i] > ub:
+                    n_arr[i] = ub
+                    clipped = True
+
+            if n_right is not None:
+                nr = float(np.interp(s_unwrapped, s_override, n_right))
+                lb = nr + vw + safety
+                if n_arr[i] < lb:
+                    n_arr[i] = lb
+                    clipped = True
+
+        if clipped:
+            traj['n'] = n_arr
+            # Recompute Cartesian coordinates
+            s_wrapped = traj['s']
+            xyz = self.track_handler.sn2cartesian(s_wrapped, n_arr)
+            if xyz.ndim == 1:
+                xyz = xyz.reshape(1, -1)
+            traj['x'] = xyz[:, 0]
+            traj['y'] = xyz[:, 1]
+            traj['z'] = xyz[:, 2]
+
+        return traj
 
     @property
     def planner_healthy(self) -> bool:
